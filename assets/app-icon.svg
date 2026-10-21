@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <title>EyeBreak — eye and clock</title>
+  <rect x="4" y="4" width="120" height="120" rx="26" fill="#121b24"/>
+  <path d="M18 62 C40 31 88 31 110 62 C88 93 40 93 18 62Z"
+        fill="none" stroke="#77d7c0" stroke-width="6" stroke-linejoin="round"/>
+  <circle cx="64" cy="62" r="18" fill="#77d7c0"/>
+  <path d="M64 49 V63 L74 69" fill="none" stroke="#121b24"
+        stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <g fill="#77d7c0"><circle cx="46" cy="104" r="3"/>
+    <circle cx="64" cy="104" r="3"/><circle cx="82" cy="104" r="3"/></g>
+</svg>

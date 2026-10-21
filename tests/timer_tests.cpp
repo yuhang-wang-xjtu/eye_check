@@ -1,0 +1,95 @@
+#include "../src/timer.h"
+#include <cstdlib>
+#include <iostream>
+void check(bool condition, const char* name) {
+    if (!condition) { std::cerr << "FAILED: " << name << '\n'; std::exit(1); }
+}
+int main() {
+    BreakTimer t(1000);
+    check(!t.tick(1200999), "no early reminder");
+    check(t.tick(1201000), "reminder at deadline");
+    check(!t.tick(1201001), "no duplicate reminder");
+    t.tick(1226000, 500, true);
+    check(t.state == BreakTimer::State::Waiting && t.left(1226000) == BreakTimer::WorkMs, "rest waits for activity");
+    t.tick(9000000, 500, true);
+    check(t.state == BreakTimer::State::Waiting, "no input means no countdown even after a long wait");
+    t.tick(9000001, 9000001, true);
+    check(t.state == BreakTimer::State::Working && t.left(9000001) == BreakTimer::WorkMs, "new input starts a full work cycle");
+    t = BreakTimer(1221000);
+    t.toggle(1222000);
+    check(t.left(9999999) == BreakTimer::WorkMs - 1000, "pause freezes time");
+    t.toggle(10000000);
+    check(t.left(10000000) == BreakTimer::WorkMs - 1000, "resume preserves time");
+    t.toggle(10001000);
+    t.rest(10002000);
+    t.tick(10027000, 800, true);
+    check(t.state == BreakTimer::State::Waiting, "manual rest waits too");
+    t.toggle(10028000);
+    check(t.state == BreakTimer::State::Working && t.left(10028000) == BreakTimer::WorkMs, "manual continue starts full cycle");
+    t.toggle(10029000);
+    t.resetAfterSleep(20000000);
+    check(t.state == BreakTimer::State::Paused && t.left(20000000) == BreakTimer::WorkMs, "sleep resets paused cycle");
+    t.toggle(20000000);
+    t.resetAfterSleep(30000000);
+    check(t.left(30000000) == BreakTimer::WorkMs, "sleep resets active cycle");
+    t.restDurationMs = 40000;
+    t.rest(30000000);
+    t.tick(30025000, 1000, true);
+    check(t.state == BreakTimer::State::Resting, "custom duration respected");
+    t.tick(30040000, 1200, true);
+    check(t.state == BreakTimer::State::Waiting, "input during rest does not restart at completion");
+    t.tick(30041000, 1200, true);
+    check(t.state == BreakTimer::State::Waiting, "previous input cannot resume");
+    t.tick(30042000, 30042000, true);
+    check(t.state == BreakTimer::State::Working, "new input after completion resumes");
+    t.away(30042000, 1201, true);
+    t.tick(90000000, 1201, true);
+    check(t.state == BreakTimer::State::Away && t.left(90000000) == BreakTimer::WorkMs, "away caps without new input");
+    t.resetAfterSleep(90000000);
+    check(t.state == BreakTimer::State::Away, "sleep preserves away state");
+    t.toggle(90001000);
+    check(t.state == BreakTimer::State::Working, "return explicitly resumes");
+    t.rest(90002000);
+    t.skip(90003000);
+    check(t.state == BreakTimer::State::Working && t.left(90003000) == BreakTimer::WorkMs, "skip starts new cycle");
+    t.rest(90004000);
+    t.tick(90044000, 0, false);
+    t.tick(90045000, 100, true);
+    check(t.state == BreakTimer::State::Waiting, "failed input read establishes baseline without resuming");
+    t.tick(90046000, 90046000, true);
+    check(t.state == BreakTimer::State::Working, "fresh input after failed baseline resumes");
+    t.rest(90047000);
+    check(!t.deviceActivity(90048000) && t.state == BreakTimer::State::Resting, "controller input cannot end rest early");
+    t.tick(90087000);
+    check(t.deviceActivity(90088000) && t.left(90088000) == BreakTimer::WorkMs, "controller resumes full work cycle after rest");
+    t.away(90088000);
+    check(t.deviceActivity(90089000) && t.state == BreakTimer::State::Working, "controller resumes away mode");
+    t.state = BreakTimer::State::Paused;
+    check(!t.deviceActivity(90090000), "controller cannot cancel manual pause");
+    BreakTimer recovery(0);
+    recovery.away(148000, 20, true);
+    check(recovery.left(148000) == 1052000, "away preserves 17:32");
+    check(recovery.left(149000) == 1057000, "one second adds five seconds: 17:37");
+    recovery.tick(149000, 20, true);
+    check(recovery.state == BreakTimer::State::Away, "entry input cannot resume");
+    recovery.tick(150000, 21, true);
+    check(recovery.state == BreakTimer::State::Working && recovery.left(150000) == 1062000, "new input resumes recovered 17:42");
+    check(recovery.left(151000) == 1061000, "normal countdown after recovery");
+    recovery.away(151000);
+    check(recovery.deviceActivity(152000) && recovery.left(152000) == 1066000, "controller preserves recovered remainder");
+    recovery.away(152000);
+    recovery.toggle(153000);
+    check(recovery.left(153000) == 1071000, "manual return uses recovered remainder");
+    BreakTimer stale(1000);
+    stale.rest(1000); stale.tick(26000,25000,true);
+    stale.tick(27000,24000,true);
+    check(stale.state==BreakTimer::State::Waiting,"older delayed input must not restart work");
+    stale.tick(28000,26000,true);
+    check(stale.state==BreakTimer::State::Waiting,"input at completion boundary must not restart work");
+    stale.tick(29000,28000,true);
+    check(stale.state==BreakTimer::State::Working,"new input after boundary restarts work");
+    stale.finish(0xfffffff0U,true,0xfffffff5ULL);
+    stale.tick(0x100000010ULL,5,true);
+    check(stale.state==BreakTimer::State::Working,"completion cutoff handles 32 bit input timestamp wrap");
+    std::cout << "All timer checks passed.\n";
+}

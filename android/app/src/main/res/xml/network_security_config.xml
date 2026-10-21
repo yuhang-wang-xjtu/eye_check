@@ -1,0 +1,5 @@
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false"/>
+    <!-- Local contract-server testing only; credentials require HTTPS remotely. -->
+    <domain-config cleartextTrafficPermitted="true"><domain includeSubdomains="false">localhost</domain><domain includeSubdomains="false">127.0.0.1</domain><domain includeSubdomains="false">10.0.2.2</domain></domain-config>
+</network-security-config>
