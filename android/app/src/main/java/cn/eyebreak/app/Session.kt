@@ -58,7 +58,9 @@ class Session(now: Long = System.currentTimeMillis()) : Serializable {
                 sittingMs += elapsed; workMs += elapsed
                 countUsage(updatedAt, end)
                 if (now >= deadline) {
-                    phase = Phase.RESTING; deadline += options.restSeconds * 1000L; events += "REST_START"
+                    // A late background delivery must still present a full rest,
+                    // rather than assuming the user rested before seeing any alert.
+                    phase = Phase.RESTING; deadline = now + options.restSeconds * 1000L; events += "REST_START"
                 }
             }
             Phase.AWAY -> {

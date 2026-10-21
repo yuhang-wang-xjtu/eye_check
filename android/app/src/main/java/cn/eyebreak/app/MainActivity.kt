@@ -19,6 +19,8 @@ import java.util.UUID
 
 class MainActivity : Activity() {
     private lateinit var updater: GitHubUpdater
+    private var reminderDialog: AlertDialog? = null
+    private var reminderEvent = ""
     private lateinit var repo: Repository
     private lateinit var countdown: TextView
     private lateinit var phase: TextView
@@ -33,7 +35,7 @@ class MainActivity : Activity() {
     private var lastInteraction = 0L
     private val handler = Handler(Looper.getMainLooper())
     private val update: () -> Unit = { if (::countdown.isInitialized) render() }
-    private val showEvents: (List<String>) -> Unit = { events -> events.firstOrNull { it !in listOf("REST_START","REST_END") }?.let { showReminder(it) } }
+    private val showEvents: (List<String>) -> Unit = { events -> events.firstOrNull()?.let { showReminder(it) } }
     private val ticker = object : Runnable {
         override fun run() { if (!repo.running) repo.tick(); render(); handler.postDelayed(this, 1000) }
     }
@@ -46,11 +48,25 @@ class MainActivity : Activity() {
             bg = 0xfff6f8f9.toInt(); surface = 0xffdfede9.toInt(); ink = 0xff1b2e31.toInt(); muted = 0xff51676d.toInt(); accent = 0xff106f5b.toInt()
         }
         build()
+        val presentation = getSharedPreferences("reminder-presentation", MODE_PRIVATE)
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED && !presentation.getBoolean("notificationAsked", false)) {
+            presentation.edit().putBoolean("notificationAsked", true).apply()
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 11)
+        }
         intent.getStringExtra("event")?.let { window.decorView.post { showReminder(it) } }
     }
-    override fun onStart() { super.onStart(); updater.start(); repo.listeners += update; repo.eventListeners += showEvents; handler.post(ticker) }
+    override fun onStart() {
+        super.onStart(); repo.foreground = true; ReminderPopup.dismiss(); updater.start()
+        repo.listeners += update; repo.eventListeners += showEvents; handler.post(ticker)
+        if (!repo.running && BackgroundReminder.enabled(this)) startBackground()
+    }
     override fun onResume() { super.onResume(); updater.resume() }
-    override fun onStop() { updater.stop(); handler.removeCallbacks(ticker); repo.listeners -= update; repo.eventListeners -= showEvents; repo.save(); super.onStop() }
+    override fun onStop() { repo.foreground = false; reminderDialog?.dismiss(); reminderDialog = null; updater.stop(); handler.removeCallbacks(ticker); repo.listeners -= update; repo.eventListeners -= showEvents; repo.save(); super.onStop() }
+    private fun startBackground() {
+        BackgroundReminder.enable(this, true)
+        try { startForegroundService(Intent(this, ReminderService::class.java)) }
+        catch (e: RuntimeException) { repo.lastError = "后台提醒启动失败，请重新开启"; android.util.Log.e("EyeBreakService", "Cannot start service", e) }
+    }
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
     private fun shape(color: Int, radius: Int = 18) = GradientDrawable().apply { setColor(color); cornerRadius = dp(radius).toFloat() }
     private fun label(text: String, size: Float = 14f, color: Int = ink): TextView = TextView(this).apply { this.text = text; textSize = size; setTextColor(color); setPadding(0, dp(6), 0, dp(6)) }
@@ -88,7 +104,7 @@ class MainActivity : Activity() {
         }; root.addView(primary)
         rest = button("立即休息") { repo.command("rest") }; root.addView(rest)
         root.addView(button("开始后台提醒") {
-            startForegroundService(Intent(this, ReminderService::class.java))
+            startBackground()
             if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
                 requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 11)
         })
@@ -100,6 +116,9 @@ class MainActivity : Activity() {
     }
     private fun render() {
         val s = repo.session
+        if ((reminderEvent == "REST_START" && s.phase != Phase.RESTING) || (reminderEvent == "REST_END" && s.phase != Phase.WAITING)) {
+            reminderDialog?.dismiss(); reminderDialog = null; reminderEvent = ""
+        }
         phase.text = Alerts.phaseText(s.phase)
         countdown.text = if (s.phase == Phase.WAITING) "00:00" else Alerts.clock(s.remainingAt(repo.now()))
         val today = Instant.ofEpochMilli(repo.now()).atZone(ZoneId.of(s.zone)).toLocalDate().toString()
@@ -111,7 +130,10 @@ class MainActivity : Activity() {
         val exact = Build.VERSION.SDK_INT < 31 || getSystemService(AlarmManager::class.java).canScheduleExactAlarms()
         notice.text = listOfNotNull(if (!repo.running) "后台提醒未开启" else null,
             if (!getSystemService(NotificationManager::class.java).areNotificationsEnabled()) "通知权限未开启" else null,
-            if (!exact) "未开启精确定时，后台提醒可能延迟" else null, repo.lastError.takeIf { it.isNotEmpty() }).joinToString(" · ")
+            if (!exact) "未开启精确定时，后台提醒可能延迟" else null,
+            if (BackgroundReminder.popup(this) && !Settings.canDrawOverlays(this)) "后台弹窗需开启悬浮窗权限" else null,
+            if (getSystemService(NotificationManager::class.java).getNotificationChannel(Alerts.channelId(s))?.importance?.let { it < NotificationManager.IMPORTANCE_HIGH } == true) "提醒通知横幅被关闭，请在设置中开启" else null,
+            repo.lastError.takeIf { it.isNotEmpty() }).joinToString(" · ")
     }
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
         if(event.action == MotionEvent.ACTION_DOWN) {
@@ -164,11 +186,17 @@ class MainActivity : Activity() {
             } catch (_: Exception) { toast("声音暂不可用，请重新选择") }
         })
         val overlay = check(box, "桌面悬浮倒计时", o.overlay)
+        val popup = check(box, "到点弹窗（需悬浮窗权限）", BackgroundReminder.popup(this))
         box.addView(button("悬浮窗权限") { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) })
         if (Build.VERSION.SDK_INT >= 31) box.addView(button("开启精确定时权限") { startActivity(Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM, Uri.parse("package:$packageName"))) })
         box.addView(button("系统通知设置") { startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, packageName)) })
+        box.addView(button("提醒声音与弹出通知设置") { Alerts.prepareChannel(this, repo.session); startActivity(Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, packageName).putExtra(Settings.EXTRA_CHANNEL_ID, Alerts.channelId(repo.session))) })
+        box.addView(button("系统后台电池设置") { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) })
+        box.addView(button("5 秒后测试提醒") { startForegroundService(Intent(this, ReminderService::class.java).setAction("TEST")); toast("5 秒后提醒，可切到其他 App 验证；不改变计时") })
+        box.addView(button("应用权限与后台设置") { startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))) })
+        box.addView(label("部分系统还需在应用权限中允许后台弹出界面，并放宽后台电池限制。精确定时使用系统可见闹钟，仅在提醒到点时唤醒。", 12f, muted))
         box.addView(button("检查 GitHub 更新（${BuildConfig.VERSION_NAME}）") { updater.check() })
-        box.addView(button("停止后台提醒") { stopService(Intent(this, ReminderService::class.java)); toast("后台提醒已停止") })
+        box.addView(button("停止后台提醒") { BackgroundReminder.enable(this, false); startService(Intent(this, ReminderService::class.java).setAction("STOP")); toast("后台提醒已停止") })
         val dialog = AlertDialog.Builder(this).setTitle("提醒设置").setView(view).setPositiveButton("保存", null).setNegativeButton("取消", null).create()
         dialog.setOnShowListener {
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
@@ -178,6 +206,7 @@ class MainActivity : Activity() {
                         nightHour = read(hour, 0..23), nightMinute = read(minute, 0..59), sittingEnabled = sitting.isChecked, workEnabled = work.isChecked,
                         nightEnabled = night.isChecked, soundEnabled = sound.isChecked, lightMode = light.isChecked, overlay = overlay.isChecked)
                     if (draft.overlay && !Settings.canDrawOverlays(this)) { toast("请先授权悬浮窗权限"); return@setOnClickListener }
+                    BackgroundReminder.popup(this, popup.isChecked)
                     repo.changeOptions(draft); dialog.dismiss(); if (repo.session.options.lightMode != o.lightMode) recreate()
                 } catch (_: Exception) { toast("请输入范围内的有效数值") }
             }
@@ -237,10 +266,13 @@ class MainActivity : Activity() {
         intent.getStringExtra("event")?.let { showReminder(it) }
     }
     private fun showReminder(event: String) {
-        if(event in listOf("REST_START", "REST_END")) return
-        val title = when(event) { "SITTING" -> "久坐提醒"; "LONG_WORK" -> "连续工作过长"; else -> "深夜提醒" }
-        AlertDialog.Builder(this).setTitle(title).setMessage("请安排休息或结束本轮工作。手动休息按 5:1 回补，每日使用统计不会扣减。")
-            .setPositiveButton("立即休息") { _, _ -> repo.command("rest") }
-            .setNeutralButton("结束本轮工作") { _, _ -> repo.command("end_work") }.setNegativeButton("知道了",null).show()
+        if (event == "REST_START" && repo.session.phase != Phase.RESTING) {
+            if (repo.session.phase == Phase.WAITING) showReminder("REST_END")
+            return
+        }
+        if (event == "REST_END" && repo.session.phase != Phase.WAITING) return
+        reminderDialog?.dismiss()
+        reminderEvent = event
+        reminderDialog = ReminderDialogs.build(this, event, repo.session) { repo.command(it) }.also { it.show() }
     }
 }

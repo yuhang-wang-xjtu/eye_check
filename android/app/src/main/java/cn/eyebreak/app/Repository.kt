@@ -25,6 +25,7 @@ class Repository private constructor(val context: Context) {
     var busy = false
         private set
     var running = false
+    var foreground = false
     var lastError = ""
     private var baseWall = System.currentTimeMillis()
     private var baseElapsed = SystemClock.elapsedRealtime()
@@ -33,13 +34,27 @@ class Repository private constructor(val context: Context) {
     private val main = Handler(Looper.getMainLooper())
     val listeners = mutableSetOf<() -> Unit>()
     val eventListeners = mutableSetOf<(List<String>) -> Unit>()
-    var onEvents: ((List<String>) -> Unit)? = null
-    private fun events(value: List<String>) { onEvents?.invoke(value); eventListeners.toList().forEach { it(value) } }
+    private fun events(value: List<String>) {
+        value.forEach { event ->
+            try { Alerts.show(context, event, session) }
+            catch (e: RuntimeException) { android.util.Log.e("EyeBreakService", "Reminder delivery failed", e) }
+        }
+        eventListeners.toList().forEach { listener ->
+            try { listener(value) }
+            catch (e: RuntimeException) { android.util.Log.w("EyeBreakService", "Reminder view unavailable", e) }
+        }
+    }
     private var lockPause = false
     private var localLocked = false
     @Volatile private var syncGeneration = 0
     fun now(atElapsed: Long = SystemClock.elapsedRealtime()) = baseWall + atElapsed - baseElapsed
-    fun emit() { listeners.toList().forEach { it() } }
+    fun emit() {
+        ReminderPopup.reconcile(session)
+        listeners.toList().forEach { listener ->
+            try { listener() }
+            catch (e: RuntimeException) { android.util.Log.e("EyeBreakService", "State view refresh failed", e) }
+        }
+    }
     fun save() {
         val file = activeFile()
         var stream: java.io.FileOutputStream? = null
@@ -60,16 +75,18 @@ class Repository private constructor(val context: Context) {
             if (!linked || busy) { syncStatus = "尚未连接；操作未提交，可重试连接或切换本地模式"; emit(); completed?.invoke(); return }
             contact(action, completed = completed); return
         }
+        tick() // Deliver any deadline event before a button action settles the model.
         session.command(action, now()); save(); emit(); completed?.invoke()
     }
     fun activity() { if (session.phase == Phase.WAITING || session.phase == Phase.AWAY) command("continue") }
+    fun testReminder() { events(listOf("TEST")) }
     fun changeOptions(options: Options) {
         if (sync.enabled) {
             if (!linked || busy) { syncStatus = "请先连接服务器再保存共享提醒设置"; emit(); return }
             session.options = session.options.copy(lightMode = options.lightMode, overlay = options.overlay, soundEnabled = options.soundEnabled, soundUri = options.soundUri)
             save()
             contact("settings", options)
-        } else { session.tick(now()); session.options = options; save(); emit() }
+        } else { tick(); session.options = options; save(); emit() }
     }
     fun screenOff() {
         // Locking one phone must not pause a shared session active on the PC.

@@ -38,14 +38,16 @@ class SessionTest {
         assertEquals(5000L, s.usage["2026-10-19"]); assertEquals(5000L, s.usage["2026-10-20"])
     }
     @Test fun lateCallbacksStopAtEyeDeadline() {
-        val s = session(); s.tick(Session.WORK_MS + 100000)
-        assertEquals(Phase.WAITING, s.phase); assertEquals(Session.WORK_MS, s.workMs)
+        val s = session(); assertEquals(listOf("REST_START"), s.tick(Session.WORK_MS + 100000))
+        assertEquals(Phase.RESTING, s.phase); assertEquals(Session.WORK_MS, s.workMs)
         assertEquals(Session.WORK_MS, s.usage.values.sum())
+        assertEquals(Session.WORK_MS+125000,s.deadline)
     }
     @Test fun delayedRestDoesNotRestartTimer() {
         val s = session(); s.options.restSeconds = 40
         s.tick(Session.WORK_MS + 25000); assertEquals(Phase.RESTING, s.phase)
-        s.tick(Session.WORK_MS + 40000); assertEquals(Phase.WAITING, s.phase)
+        s.tick(Session.WORK_MS + 40000); assertEquals(Phase.RESTING, s.phase)
+        s.tick(Session.WORK_MS + 65000); assertEquals(Phase.WAITING, s.phase)
     }
     @Test fun healthFlagsRearmAfterRecovery() {
         val s = session(); s.options.sittingMinutes = 1

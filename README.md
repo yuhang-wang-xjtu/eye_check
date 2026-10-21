@@ -1,6 +1,6 @@
 # 20·20·20 Windows 护眼提醒
 
-下载最新版：[GitHub Releases](https://github.com/yuhang-wang-xjtu/eye_check/releases/latest)。Windows 下载 `EyeBreak-Windows-x64-v0.2.1.zip`，退出旧程序后解压运行 `EyeBreak.exe`；设置和记录保留在原 LocalAppData 目录。Android 下载 `EyeBreak-Android-v0.2.1.apk` 覆盖安装，之后可在设置页“检查 GitHub 更新”。Windows 暂不提供应用内更新。
+下载最新版：[GitHub Releases](https://github.com/yuhang-wang-xjtu/eye_check/releases/latest)。Windows 下载 `EyeBreak-Windows-x64-v0.2.1.zip`，退出旧程序后解压运行 `EyeBreak.exe`；设置和记录保留在原 LocalAppData 目录。Android 下载 `EyeBreak-Android-v0.2.2.apk` 覆盖安装，之后可在设置页“检查 GitHub 更新”。Windows 暂不提供应用内更新。
 
 v0.2.1 为原型发布。Android APK 使用调试签名，覆盖更新必须保持签名一致；签名密钥不得提交仓库。Windows 发布包使用静态 MSVC 运行库构建（CMake 配置加 `-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded`）。发布附件提供 SHA-256 清单。
 

@@ -21,12 +21,11 @@ object Alerts {
         val timer = NotificationClock.from(s, now, SystemClock.elapsedRealtime(), System.currentTimeMillis())
         manager(c).createNotificationChannel(NotificationChannel(STATUS, "计时状态", NotificationManager.IMPORTANCE_LOW).apply { setSound(null, null) })
         val text = if (timer.countdown) {
-            if (s.phase == Phase.WORKING) "距离下一次护眼休息" else "请看向远处，让眼睛放松"
+            if (s.phase == Phase.WORKING) "剩余 ${clock(timer.remainingMs)} · 距离护眼休息" else "剩余 ${clock(timer.remainingMs)} · 请看向远处"
         } else if(s.phase == Phase.WAITING) "休息完成 · 等待新的操作或点击继续工作" else clock(timer.remainingMs)
         val notification = Notification.Builder(c, STATUS).setSmallIcon(R.drawable.ic_notification).setContentTitle("20·20·20 · ${phaseText(s.phase)}")
             .setContentText(text).setContentIntent(open(c)).setOnlyAlertOnce(true).setOngoing(true)
-            .setShowWhen(timer.countdown).setUsesChronometer(timer.countdown).setChronometerCountDown(timer.countdown)
-            .setWhen(if(timer.countdown) timer.whenWallMs else 0)
+            .setShowWhen(false).setUsesChronometer(false)
             .addAction(Notification.Action.Builder(null, if (s.phase == Phase.WORKING) "暂停" else if (s.phase == Phase.RESTING) "跳过休息" else "继续工作",
                 action(c, if (s.phase == Phase.WORKING) "pause" else if (s.phase == Phase.RESTING) "skip" else "continue")).build())
         if(s.phase != Phase.AWAY) notification.addAction(Notification.Action.Builder(null, "立即休息", action(c, "rest")).build())
@@ -37,14 +36,20 @@ object Alerts {
         try { manager(c).notify(20,ongoing(c,s,now)) }
         catch (e: SecurityException) { android.util.Log.w("EyeBreakService","Notification permission unavailable",e) }
     }
+    fun channelId(s: Session) = "reminder_${s.options.soundEnabled}_${s.options.soundUri.hashCode()}"
     fun show(c: Context, event: String, s: Session) {
-        val channelId = "reminder_${s.options.soundEnabled}_${s.options.soundUri.hashCode()}"
-        val channel = NotificationChannel(channelId, "护眼与健康提醒", NotificationManager.IMPORTANCE_HIGH)
-        val sound = if (!s.options.soundEnabled) null else if (s.options.soundUri.isEmpty()) Settings.System.DEFAULT_NOTIFICATION_URI else Uri.parse(s.options.soundUri)
-        channel.setSound(sound, android.media.AudioAttributes.Builder().setUsage(android.media.AudioAttributes.USAGE_NOTIFICATION).build())
-        channel.enableVibration(true); manager(c).createNotificationChannel(channel)
-        val title = when (event) { "REST_START" -> "该让眼睛休息了"; "REST_END" -> "休息完成"; "SITTING" -> "久坐提醒"; "LONG_WORK" -> "连续工作过长"; else -> "深夜提醒" }
+        try { showNotification(c, event, s) }
+        catch (e: RuntimeException) { android.util.Log.e("EyeBreakService", "Reminder notification failed: $event", e) }
+        ReminderPopup.show(c, event, s)
+    }
+    private fun showNotification(c: Context, event: String, s: Session) {
+        val channelId = channelId(s)
+        prepareChannel(c, s)
+        if (event == "REST_START") manager(c).cancel("REST_END".hashCode())
+        if (event == "REST_END") manager(c).cancel("REST_START".hashCode())
+        val title = when (event) { "TEST" -> "护眼提醒测试"; "REST_START" -> "该让眼睛休息了"; "REST_END" -> "休息完成"; "SITTING" -> "久坐提醒"; "LONG_WORK" -> "连续工作过长"; else -> "深夜提醒" }
         val text = when (event) {
+            "TEST" -> "这是一条测试提醒，不会改变倒计时"
             "REST_START" -> "远眺约 6 米，休息 ${s.options.restSeconds} 秒"
             "REST_END" -> "等待点击继续，或在本应用中操作后开始计时"
             "SITTING" -> "请起身活动，也可以立即休息"
@@ -53,10 +58,17 @@ object Alerts {
         }
         val notification = Notification.Builder(c, channelId).setSmallIcon(R.drawable.ic_notification).setContentTitle(title)
             .setContentText(text).setStyle(Notification.BigTextStyle().bigText(text)).setContentIntent(open(c,event)).setAutoCancel(true)
+            .setCategory(Notification.CATEGORY_REMINDER).setVisibility(Notification.VISIBILITY_PUBLIC)
         if (event == "REST_END") notification.addAction(Notification.Action.Builder(null, "继续工作", action(c, "continue")).build())
         if (event != "REST_START") notification.addAction(Notification.Action.Builder(null, "立即休息", action(c, "rest")).build())
         if (event in listOf("SITTING", "LONG_WORK", "LATE_NIGHT")) notification.addAction(Notification.Action.Builder(null, "结束本轮工作", action(c, "end_work")).build())
         try { manager(c).notify(event.hashCode(), notification.build()) } catch (_: SecurityException) { /* User may decline notifications. */ }
+    }
+    fun prepareChannel(c: Context, s: Session) {
+        val channel = NotificationChannel(channelId(s), "护眼与健康提醒", NotificationManager.IMPORTANCE_HIGH)
+        val sound = if (!s.options.soundEnabled) null else if (s.options.soundUri.isEmpty()) Settings.System.DEFAULT_NOTIFICATION_URI else Uri.parse(s.options.soundUri)
+        channel.setSound(sound, android.media.AudioAttributes.Builder().setUsage(android.media.AudioAttributes.USAGE_NOTIFICATION).build())
+        channel.enableVibration(true); manager(c).createNotificationChannel(channel)
     }
     fun clock(ms: Long): String { val seconds = (ms.coerceAtLeast(0) + 999) / 1000; return "%02d:%02d".format(seconds / 60, seconds % 60) }
     fun phaseText(p: Phase) = when (p) { Phase.WORKING -> "工作中"; Phase.PAUSED -> "已暂停"; Phase.RESTING -> "远眺休息中"; Phase.WAITING -> "等待继续"; Phase.AWAY -> "休息回补中" }
@@ -64,33 +76,44 @@ object Alerts {
 }
 
 object AlarmSchedule {
-    private var scheduled = Long.MIN_VALUE
+    private val ticket = AlarmTicket()
+    private var canceled = false
+    fun fired() { ticket.clear(); canceled = false }
     fun set(c: Context, s: Session, now: Long) {
         val alarm = c.getSystemService(AlarmManager::class.java)
-        val at = when (s.phase) {
-            Phase.WORKING -> minOf(s.deadline, now + (60000 - now % 60000)) // Also check health/night thresholds.
-            Phase.RESTING -> s.deadline
-            else -> 0L
-        }
-        if (at == scheduled) return
-        scheduled = at
+        val at = ReminderDeadline.next(s, now)
         val pending = Alerts.action(c, "alarm")
+        if (at == null) { cancel(c); return }
+        val exact = Build.VERSION.SDK_INT < 31 || alarm.canScheduleExactAlarms()
+        if (ticket.matches(at, exact)) return
+        ticket.clear(); canceled = false
         alarm.cancel(pending)
-        if (at <= 0) return
-        // Use elapsed real time so changing the device clock cannot move a deadline.
-        val elapsed = SystemClock.elapsedRealtime() + (at - now).coerceAtLeast(100)
+        val delay = (at - now).coerceAtLeast(100)
         try {
-            if (Build.VERSION.SDK_INT < 31 || alarm.canScheduleExactAlarms()) alarm.setExactAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, elapsed, pending)
-            else alarm.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, elapsed, pending)
-        } catch (_: SecurityException) { alarm.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, elapsed, pending) }
+            if (exact) {
+                // Visible user-requested timer deadlines; no minute alarms consuming
+                // the idle quota before the short rest-completion alarm.
+                alarm.setAlarmClock(AlarmManager.AlarmClockInfo(System.currentTimeMillis() + delay, Alerts.open(c)), pending)
+            } else {
+                alarm.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, SystemClock.elapsedRealtime() + delay, pending)
+            }
+            ticket.armed(at, exact)
+        } catch (e: SecurityException) {
+            android.util.Log.w("EyeBreakService", "Exact alarm permission changed", e)
+            alarm.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, SystemClock.elapsedRealtime() + delay, pending)
+            ticket.armed(at, false)
+        }
     }
-    fun cancel(c: Context) { c.getSystemService(AlarmManager::class.java).cancel(Alerts.action(c, "alarm")); scheduled = Long.MIN_VALUE }
+    fun cancel(c: Context) {
+        if (!canceled) c.getSystemService(AlarmManager::class.java).cancel(Alerts.action(c, "alarm"))
+        ticket.clear(); canceled = true
+    }
 }
 
 class AlarmReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val repo = Repository.get(context)
-        repo.onEvents = { events -> events.forEach { Alerts.show(context, it, repo.session) } }
+        if (intent.action == "alarm") AlarmSchedule.fired()
         if(intent.action != "alarm" && intent.action != null && repo.sync.enabled) {
             val pending = goAsync()
             repo.command(intent.action!!) {
@@ -102,6 +125,10 @@ class AlarmReceiver : BroadcastReceiver() {
         if (intent.action == "alarm") repo.tick() else intent.action?.let { repo.command(it) }
         AlarmSchedule.set(context, repo.session, repo.now())
         Alerts.refresh(context,repo.session,repo.now())
+        if (intent.action == "alarm" && !repo.running && BackgroundReminder.enabled(context)) {
+            try { context.startForegroundService(Intent(context, ReminderService::class.java)) }
+            catch (e: RuntimeException) { android.util.Log.w("EyeBreakService", "Timer delivered without service restart", e) }
+        }
     }
 }
 
@@ -112,11 +139,13 @@ class ReminderService : Service() {
     private var nextSync = 0L
     private var notificationKey = ""
     private var lastTickElapsed = 0L
+    private var explicitStop = false
     private val screen = object : BroadcastReceiver() {
         override fun onReceive(c: Context, intent: Intent) {
             if (intent.action == Intent.ACTION_SCREEN_OFF) repo.screenOff()
             if (intent.action == Intent.ACTION_USER_PRESENT) repo.unlocked()
             if (intent.action == Intent.ACTION_SCREEN_ON || intent.action == Intent.ACTION_TIME_CHANGED) {
+                if (intent.action == Intent.ACTION_TIME_CHANGED) AlarmSchedule.fired()
                 repo.tick(); notificationKey = ""; update()
             }
         }
@@ -142,11 +171,11 @@ class ReminderService : Service() {
     private val changed: () -> Unit = { if (::repo.isInitialized) update() }
     override fun onCreate() {
         super.onCreate(); repo = Repository.get(this); repo.running = true
-        android.util.Log.i("EyeBreakService","Service started; system notification chronometer enabled")
+        android.util.Log.i("EyeBreakService","Service started; clamped notification countdown enabled")
         repo.tick()
         startForeground(20, Alerts.ongoing(this, repo.session, repo.now()))
-        repo.onEvents = { events -> events.forEach { Alerts.show(this, it, repo.session) } }
         repo.listeners += changed
+        update()
         val filter = IntentFilter().apply { addAction(Intent.ACTION_SCREEN_OFF); addAction(Intent.ACTION_USER_PRESENT); addAction(Intent.ACTION_SCREEN_ON); addAction(Intent.ACTION_TIME_CHANGED) }
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(screen, filter, RECEIVER_NOT_EXPORTED) else registerReceiver(screen, filter)
         handler.post(ticker)
@@ -206,13 +235,22 @@ class ReminderService : Service() {
         catch (e: RuntimeException) { android.util.Log.w("EyeBreakService","Overlay already removed",e) }
     }
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == "TEST") handler.postDelayed({ repo.testReminder() }, 5000)
+        if (intent?.action == "STOP") {
+            explicitStop = true
+            if (!repo.sync.enabled) repo.session.command("pause", repo.now())
+            repo.save(); AlarmSchedule.cancel(this); stopSelf(); return START_NOT_STICKY
+        }
         notificationKey=""; update(); return START_STICKY
     }
     override fun onDestroy() {
         android.util.Log.i("EyeBreakService","Service stopped")
         handler.removeCallbacksAndMessages(null); repo.listeners -= changed; repo.running = false
-        unregisterReceiver(screen); removeOverlay(); AlarmSchedule.cancel(this)
-        repo.session.command("pause", repo.now()); repo.save(); repo.emit(); super.onDestroy()
+        unregisterReceiver(screen); removeOverlay(); ReminderPopup.dismiss()
+        if (explicitStop) AlarmSchedule.cancel(this)
+        // A system service teardown is not a user pause. Keep the deadline alarm
+        // armed so the receiver can deliver and settle the next state independently.
+        repo.save(); repo.emit(); super.onDestroy()
     }
     override fun onBind(intent: Intent?) = null
 }

@@ -5,7 +5,7 @@ import org.junit.Test
 
 class NotificationClockTest {
     private fun model()=Session(1000).apply { options.nightEnabled=false }
-    @Test fun workingCountdownKeepsAStableSystemDeadlineAcrossSeconds() {
+    @Test fun workingCountdownRefreshesTextEverySecondWithoutMovingDeadline() {
         val s=model()
         val first=NotificationClock.from(s,1000,5000,100000)
         assertTrue(first.countdown)
@@ -15,7 +15,7 @@ class NotificationClockTest {
             assertEquals(Session.WORK_MS-delta,later.remainingMs)
             assertEquals(first.endElapsedMs,later.endElapsedMs)
             assertEquals(first.whenWallMs,later.whenWallMs)
-            assertEquals(first.refreshKey,later.refreshKey)
+            assertNotEquals(first.refreshKey,later.refreshKey)
         }
     }
     @Test fun restHasItsOwnDeadlineAndWaitingStopsTheSystemClock() {
@@ -47,5 +47,12 @@ class NotificationClockTest {
         val result=NotificationClock.from(s,2000,10000,5000000)
         assertEquals(5000000+s.remainingAt(2000),result.whenWallMs)
         assertEquals(10000+s.remainingAt(2000),result.endElapsedMs)
+    }
+    @Test fun expiredTimerCannotKeepAPlatformChronometerRunningBelowZero() {
+        val s=model()
+        for(delay in listOf(0L,1000L,3600000L)) {
+            val model=NotificationClock.from(s,s.deadline+delay,10000+delay,5000000+delay)
+            assertFalse(model.countdown); assertEquals(0L,model.remainingMs)
+        }
     }
 }
