@@ -3,6 +3,7 @@ package cn.eyebreak.app
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.os.SystemClock
 import android.util.AtomicFile
 import java.io.File
@@ -25,7 +26,6 @@ class Repository private constructor(val context: Context) {
     var busy = false
         private set
     var running = false
-    var foreground = false
     var lastError = ""
     private var baseWall = System.currentTimeMillis()
     private var baseElapsed = SystemClock.elapsedRealtime()
@@ -33,23 +33,17 @@ class Repository private constructor(val context: Context) {
     private val executor = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
     val listeners = mutableSetOf<() -> Unit>()
-    val eventListeners = mutableSetOf<(List<String>) -> Unit>()
     private fun events(value: List<String>) {
         value.forEach { event ->
             try { Alerts.show(context, event, session) }
             catch (e: RuntimeException) { android.util.Log.e("EyeBreakService", "Reminder delivery failed", e) }
         }
-        eventListeners.toList().forEach { listener ->
-            try { listener(value) }
-            catch (e: RuntimeException) { android.util.Log.w("EyeBreakService", "Reminder view unavailable", e) }
-        }
     }
-    private var lockPause = false
-    private var localLocked = false
+    private var screenPolicy = ScreenUsagePolicy()
+    private fun interactive() = context.getSystemService(PowerManager::class.java).isInteractive
     @Volatile private var syncGeneration = 0
     fun now(atElapsed: Long = SystemClock.elapsedRealtime()) = baseWall + atElapsed - baseElapsed
     fun emit() {
-        ReminderPopup.reconcile(session)
         listeners.toList().forEach { listener ->
             try { listener() }
             catch (e: RuntimeException) { android.util.Log.e("EyeBreakService", "State view refresh failed", e) }
@@ -65,10 +59,14 @@ class Repository private constructor(val context: Context) {
         } catch (_: Exception) { if (stream != null) file.failWrite(stream); lastError = "本地记录尚未保存" }
     }
     fun tick() {
-        val events = session.tick(now())
-        if (events.isNotEmpty()) { save(); events(events) }
+        val previousPhase = session.phase
+        val at = now()
+        val delivered = if (sync.enabled) session.tick(at) else
+            screenPolicy.observe(session, interactive(), at) + screenPolicy.tick(session, at)
+        if (delivered.isNotEmpty() || previousPhase != session.phase) { save(); events(delivered) }
         if (SystemClock.elapsedRealtime() - lastSave > 15000) { save(); lastSave = SystemClock.elapsedRealtime() }
         emit()
+        if (sync.enabled && linked && !busy && session.phase == Phase.WAITING && interactive()) contact("continue")
     }
     fun command(action: String, completed: (() -> Unit)? = null) {
         if (sync.enabled) {
@@ -76,9 +74,9 @@ class Repository private constructor(val context: Context) {
             contact(action, completed = completed); return
         }
         tick() // Deliver any deadline event before a button action settles the model.
-        session.command(action, now()); save(); emit(); completed?.invoke()
+        session.command(action, now(), notificationOnly = true); save(); emit(); completed?.invoke()
     }
-    fun activity() { if (session.phase == Phase.WAITING || session.phase == Phase.AWAY) command("continue") }
+    fun activity() { observeScreen(interactive()) }
     fun testReminder() { events(listOf("TEST")) }
     fun changeOptions(options: Options) {
         if (sync.enabled) {
@@ -88,19 +86,11 @@ class Repository private constructor(val context: Context) {
             contact("settings", options)
         } else { tick(); session.options = options; save(); emit() }
     }
-    fun screenOff() {
-        // Locking one phone must not pause a shared session active on the PC.
-        if (sync.enabled || localLocked) return
-        localLocked = true
-        lockPause = session.phase == Phase.PAUSED
-        session.command("rest", now()); save(); emit()
-    }
-    fun unlocked() {
-        if (sync.enabled) { contact(); return }
-        if (!localLocked) return
-        session.tick(now())
-        if (lockPause) session.phase = Phase.PAUSED else session.command("continue", now())
-        lockPause = false; localLocked = false; save(); emit()
+    fun observeScreen(screenOn: Boolean) {
+        // A phone screen-off cannot pause a session still active on another device.
+        if (sync.enabled) { if (screenOn) contact(); return }
+        val delivered = screenPolicy.observe(session, screenOn, now())
+        save(); if (delivered.isNotEmpty()) events(delivered); emit()
     }
     fun connect() {
         if(!sync.enabled) { session.command("pause",now()); save() }
@@ -109,7 +99,7 @@ class Repository private constructor(val context: Context) {
     }
     fun disconnect() {
         syncGeneration++; busy=false
-        if(sync.enabled) { save(); sync.enable(false); baseWall=System.currentTimeMillis(); baseElapsed=SystemClock.elapsedRealtime(); session=read(localFile) }
+        if(sync.enabled) { save(); sync.enable(false); baseWall=System.currentTimeMillis(); baseElapsed=SystemClock.elapsedRealtime(); session=read(localFile); screenPolicy=ScreenUsagePolicy() }
         linked = false; syncStatus = "本地模式（本地历史独立保留，不覆盖服务器）"; save(); emit()
     }
     fun contact(action: String? = null, options: Options? = null, completed: (() -> Unit)? = null) {

@@ -22,13 +22,10 @@ object Alerts {
         manager(c).createNotificationChannel(NotificationChannel(STATUS, "计时状态", NotificationManager.IMPORTANCE_LOW).apply { setSound(null, null) })
         val text = if (timer.countdown) {
             if (s.phase == Phase.WORKING) "剩余 ${clock(timer.remainingMs)} · 距离护眼休息" else "剩余 ${clock(timer.remainingMs)} · 请看向远处"
-        } else if(s.phase == Phase.WAITING) "休息完成 · 等待新的操作或点击继续工作" else clock(timer.remainingMs)
+        } else if(s.phase == Phase.WAITING) "休息完成 · 亮屏后自动计时" else clock(timer.remainingMs)
         val notification = Notification.Builder(c, STATUS).setSmallIcon(R.drawable.ic_notification).setContentTitle("20·20·20 · ${phaseText(s.phase)}")
             .setContentText(text).setContentIntent(open(c)).setOnlyAlertOnce(true).setOngoing(true)
             .setShowWhen(false).setUsesChronometer(false)
-            .addAction(Notification.Action.Builder(null, if (s.phase == Phase.WORKING) "暂停" else if (s.phase == Phase.RESTING) "跳过休息" else "继续工作",
-                action(c, if (s.phase == Phase.WORKING) "pause" else if (s.phase == Phase.RESTING) "skip" else "continue")).build())
-        if(s.phase != Phase.AWAY) notification.addAction(Notification.Action.Builder(null, "立即休息", action(c, "rest")).build())
         if(Build.VERSION.SDK_INT >= 31) notification.setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE)
         return notification.build()
     }
@@ -40,7 +37,6 @@ object Alerts {
     fun show(c: Context, event: String, s: Session) {
         try { showNotification(c, event, s) }
         catch (e: RuntimeException) { android.util.Log.e("EyeBreakService", "Reminder notification failed: $event", e) }
-        ReminderPopup.show(c, event, s)
     }
     private fun showNotification(c: Context, event: String, s: Session) {
         val channelId = channelId(s)
@@ -50,8 +46,8 @@ object Alerts {
         val title = when (event) { "TEST" -> "护眼提醒测试"; "REST_START" -> "该让眼睛休息了"; "REST_END" -> "休息完成"; "SITTING" -> "久坐提醒"; "LONG_WORK" -> "连续工作过长"; else -> "深夜提醒" }
         val text = when (event) {
             "TEST" -> "这是一条测试提醒，不会改变倒计时"
-            "REST_START" -> "远眺约 6 米，休息 ${s.options.restSeconds} 秒"
-            "REST_END" -> "等待点击继续，或在本应用中操作后开始计时"
+            "REST_START" -> if (s.phase == Phase.WORKING) "请远眺约 6 米，让眼睛放松；亮屏时继续累计使用" else "请远眺约 6 米，让眼睛放松"
+            "REST_END" -> "休息结束，亮屏时自动继续计时"
             "SITTING" -> "请起身活动，也可以立即休息"
             "LONG_WORK" -> "请安排一段较长休息"
             else -> "已经进入深夜时段，请考虑结束工作"
@@ -59,9 +55,6 @@ object Alerts {
         val notification = Notification.Builder(c, channelId).setSmallIcon(R.drawable.ic_notification).setContentTitle(title)
             .setContentText(text).setStyle(Notification.BigTextStyle().bigText(text)).setContentIntent(open(c,event)).setAutoCancel(true)
             .setCategory(Notification.CATEGORY_REMINDER).setVisibility(Notification.VISIBILITY_PUBLIC)
-        if (event == "REST_END") notification.addAction(Notification.Action.Builder(null, "继续工作", action(c, "continue")).build())
-        if (event != "REST_START") notification.addAction(Notification.Action.Builder(null, "立即休息", action(c, "rest")).build())
-        if (event in listOf("SITTING", "LONG_WORK", "LATE_NIGHT")) notification.addAction(Notification.Action.Builder(null, "结束本轮工作", action(c, "end_work")).build())
         try { manager(c).notify(event.hashCode(), notification.build()) } catch (_: SecurityException) { /* User may decline notifications. */ }
     }
     fun prepareChannel(c: Context, s: Session) {
@@ -142,8 +135,8 @@ class ReminderService : Service() {
     private var explicitStop = false
     private val screen = object : BroadcastReceiver() {
         override fun onReceive(c: Context, intent: Intent) {
-            if (intent.action == Intent.ACTION_SCREEN_OFF) repo.screenOff()
-            if (intent.action == Intent.ACTION_USER_PRESENT) repo.unlocked()
+            if (intent.action == Intent.ACTION_SCREEN_OFF) repo.observeScreen(false)
+            if (intent.action == Intent.ACTION_SCREEN_ON) repo.observeScreen(true)
             if (intent.action == Intent.ACTION_SCREEN_ON || intent.action == Intent.ACTION_TIME_CHANGED) {
                 if (intent.action == Intent.ACTION_TIME_CHANGED) AlarmSchedule.fired()
                 repo.tick(); notificationKey = ""; update()
@@ -172,11 +165,12 @@ class ReminderService : Service() {
     override fun onCreate() {
         super.onCreate(); repo = Repository.get(this); repo.running = true
         android.util.Log.i("EyeBreakService","Service started; clamped notification countdown enabled")
+        repo.observeScreen(getSystemService(PowerManager::class.java).isInteractive)
         repo.tick()
         startForeground(20, Alerts.ongoing(this, repo.session, repo.now()))
         repo.listeners += changed
         update()
-        val filter = IntentFilter().apply { addAction(Intent.ACTION_SCREEN_OFF); addAction(Intent.ACTION_USER_PRESENT); addAction(Intent.ACTION_SCREEN_ON); addAction(Intent.ACTION_TIME_CHANGED) }
+        val filter = IntentFilter().apply { addAction(Intent.ACTION_SCREEN_OFF); addAction(Intent.ACTION_SCREEN_ON); addAction(Intent.ACTION_TIME_CHANGED) }
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(screen, filter, RECEIVER_NOT_EXPORTED) else registerReceiver(screen, filter)
         handler.post(ticker)
     }
@@ -238,7 +232,7 @@ class ReminderService : Service() {
         if (intent?.action == "TEST") handler.postDelayed({ repo.testReminder() }, 5000)
         if (intent?.action == "STOP") {
             explicitStop = true
-            if (!repo.sync.enabled) repo.session.command("pause", repo.now())
+            if (!repo.sync.enabled) repo.session.command("pause", repo.now(), notificationOnly = true)
             repo.save(); AlarmSchedule.cancel(this); stopSelf(); return START_NOT_STICKY
         }
         notificationKey=""; update(); return START_STICKY
@@ -246,7 +240,7 @@ class ReminderService : Service() {
     override fun onDestroy() {
         android.util.Log.i("EyeBreakService","Service stopped")
         handler.removeCallbacksAndMessages(null); repo.listeners -= changed; repo.running = false
-        unregisterReceiver(screen); removeOverlay(); ReminderPopup.dismiss()
+        unregisterReceiver(screen); removeOverlay()
         if (explicitStop) AlarmSchedule.cancel(this)
         // A system service teardown is not a user pause. Keep the deadline alarm
         // armed so the receiver can deliver and settle the next state independently.

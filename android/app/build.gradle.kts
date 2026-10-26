@@ -3,7 +3,7 @@ android {
     namespace = "cn.eyebreak.app"
     compileSdk = 35
     buildToolsVersion = "35.0.0"
-    defaultConfig { applicationId = "cn.eyebreak.app"; minSdk = 26; targetSdk = 35; versionCode = 5; versionName = "0.2.2" }
+    defaultConfig { applicationId = "cn.eyebreak.app"; minSdk = 26; targetSdk = 35; versionCode = 6; versionName = "0.2.3" }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }
     buildFeatures { buildConfig = true }
