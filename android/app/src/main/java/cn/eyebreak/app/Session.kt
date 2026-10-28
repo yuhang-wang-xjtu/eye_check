@@ -44,7 +44,14 @@ class Session(now: Long = System.currentTimeMillis()) : Serializable {
             cursor = next
         }
     }
-    fun tick(now: Long, notificationOnly: Boolean = false): List<String> {
+    internal fun recoverHealth(elapsed: Long) {
+        val recovery = elapsed.coerceIn(0, 365L * 86400000) * 5
+        sittingMs = (sittingMs - recovery).coerceAtLeast(0)
+        workMs = (workMs - recovery).coerceAtLeast(0)
+        if (sittingMs < options.sittingMinutes * 60000L) sittingSent = false
+        if (workMs < options.workMinutes * 60000L) workSent = false
+    }
+    fun tick(now: Long): List<String> {
         val events = mutableListOf<String>()
         if (now < updatedAt) { // Changing the wall clock cannot invent usage.
             if (phase == Phase.WORKING || phase == Phase.RESTING) deadline = now + (deadline - updatedAt).coerceAtLeast(0)
@@ -53,28 +60,19 @@ class Session(now: Long = System.currentTimeMillis()) : Serializable {
         }
         when (phase) {
             Phase.WORKING -> {
-                val end = if (notificationOnly) now else min(now, deadline)
+                val end = min(now, deadline)
                 val elapsed = (end - updatedAt).coerceAtLeast(0)
                 sittingMs += elapsed; workMs += elapsed
                 countUsage(updatedAt, end)
                 if (now >= deadline) {
-                    if (notificationOnly) {
-                        // One notification for missed intervals; keep the next deadline
-                        // in the future and continue counting actual screen usage.
-                        deadline += ((now - deadline) / WORK_MS + 1) * WORK_MS
-                    } else {
-                        phase = Phase.RESTING; deadline = now + options.restSeconds * 1000L
-                    }
+                    // Delayed delivery still starts a full, visible rest period.
+                    phase = Phase.RESTING; deadline = now + options.restSeconds * 1000L
                     events += "REST_START"
                 }
             }
             Phase.AWAY -> {
                 remaining = remainingAt(now)
-                val recovery = min(now - updatedAt, 365L * 86400000) * 5
-                sittingMs = (sittingMs - recovery).coerceAtLeast(0)
-                workMs = (workMs - recovery).coerceAtLeast(0)
-                if (sittingMs < options.sittingMinutes * 60000L) sittingSent = false
-                if (workMs < options.workMinutes * 60000L) workSent = false
+                recoverHealth(now - updatedAt)
             }
             else -> Unit
         }
@@ -94,8 +92,8 @@ class Session(now: Long = System.currentTimeMillis()) : Serializable {
         }
         return events
     }
-    fun command(action: String, now: Long, notificationOnly: Boolean = false) {
-        tick(now, notificationOnly)
+    fun command(action: String, now: Long) {
+        tick(now)
         when (action) {
             "pause" -> if (phase == Phase.WORKING) { remaining = remainingAt(now); phase = Phase.PAUSED }
             "continue" -> if (phase in listOf(Phase.PAUSED, Phase.WAITING, Phase.AWAY)) { deadline = now + remainingAt(now); phase = Phase.WORKING }

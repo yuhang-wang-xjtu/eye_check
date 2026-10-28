@@ -74,7 +74,7 @@ class Repository private constructor(val context: Context) {
             contact(action, completed = completed); return
         }
         tick() // Deliver any deadline event before a button action settles the model.
-        session.command(action, now(), notificationOnly = true); save(); emit(); completed?.invoke()
+        session.command(action, now()); save(); emit(); completed?.invoke()
     }
     fun activity() { observeScreen(interactive()) }
     fun testReminder() { events(listOf("TEST")) }

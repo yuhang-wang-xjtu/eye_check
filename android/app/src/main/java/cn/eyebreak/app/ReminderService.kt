@@ -46,8 +46,8 @@ object Alerts {
         val title = when (event) { "TEST" -> "护眼提醒测试"; "REST_START" -> "该让眼睛休息了"; "REST_END" -> "休息完成"; "SITTING" -> "久坐提醒"; "LONG_WORK" -> "连续工作过长"; else -> "深夜提醒" }
         val text = when (event) {
             "TEST" -> "这是一条测试提醒，不会改变倒计时"
-            "REST_START" -> if (s.phase == Phase.WORKING) "请远眺约 6 米，让眼睛放松；亮屏时继续累计使用" else "请远眺约 6 米，让眼睛放松"
-            "REST_END" -> "休息结束，亮屏时自动继续计时"
+            "REST_START" -> "请远眺约 6 米，休息 ${s.options.restSeconds} 秒；休息期间不累计使用时长"
+            "REST_END" -> if (s.phase == Phase.WORKING) "休息完成，已自动开始下一轮计时" else "休息完成，亮屏后自动继续计时"
             "SITTING" -> "请起身活动，也可以立即休息"
             "LONG_WORK" -> "请安排一段较长休息"
             else -> "已经进入深夜时段，请考虑结束工作"
@@ -232,7 +232,7 @@ class ReminderService : Service() {
         if (intent?.action == "TEST") handler.postDelayed({ repo.testReminder() }, 5000)
         if (intent?.action == "STOP") {
             explicitStop = true
-            if (!repo.sync.enabled) repo.session.command("pause", repo.now(), notificationOnly = true)
+            if (!repo.sync.enabled) repo.session.command("pause", repo.now())
             repo.save(); AlarmSchedule.cancel(this); stopSelf(); return START_NOT_STICKY
         }
         notificationKey=""; update(); return START_STICKY

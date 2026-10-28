@@ -113,9 +113,9 @@ class MainActivity : Activity() {
     }
     private fun render() {
         val s = repo.session
-        restHelp.text = if (repo.sync.enabled) "远眺约 6 米 · 共享周期由服务器统一结算" else "远眺约 6 米 · 熄屏即可休息回补"
+        restHelp.text = if (repo.sync.enabled) "远眺约 6 米 · 共享周期由服务器统一结算" else "远眺约 6 米 · 自动休息 ${s.options.restSeconds} 秒"
         usageHelp.text = if (repo.sync.enabled) "共享模式按服务器周期计时；亮屏在线时休息完成自动继续，手机熄屏不暂停其他设备。到点只发送通知。" else
-            "亮屏即视为使用，熄屏按 5:1 回补，再亮屏自动计时。到点只通知，不询问是否继续；每日累计不因回补减少。"
+            "到点自动休息，休息期间不累计使用时长；开始和结束均通知。休息结束后亮屏自动继续，熄屏按 5:1 回补，不弹确认框。"
         phase.text = Alerts.phaseText(s.phase)
         countdown.text = if (s.phase == Phase.WAITING) "00:00" else Alerts.clock(s.remainingAt(repo.now()))
         val today = Instant.ofEpochMilli(repo.now()).atZone(ZoneId.of(s.zone)).toLocalDate().toString()
@@ -142,7 +142,7 @@ class MainActivity : Activity() {
     private fun check(parent: LinearLayout, text: String, selected: Boolean) = CheckBox(this).apply { this.text = text; isChecked = selected; setTextColor(ink); parent.addView(this) }
     private fun showSettings() {
         val (view, box) = form(); val o = repo.session.options
-        val restSeconds = if (repo.sync.enabled) number(box, "共享会话休息时长（1–600 秒）", o.restSeconds) else null
+        val restSeconds = number(box, "自动休息时长（1–600 秒）", o.restSeconds)
         val sitting = check(box, "久坐提醒", o.sittingEnabled); val sittingMins = number(box, "久坐周期（1–480 分钟）", o.sittingMinutes)
         val work = check(box, "连续工作提醒", o.workEnabled); val workMins = number(box, "连续工作周期（1–720 分钟）", o.workMinutes)
         val night = check(box, "深夜提醒", o.nightEnabled); val hour = number(box, "深夜开始小时（0–23）", o.nightHour); val minute = number(box, "分钟（0–59；深夜截至 06:00）", o.nightMinute)
@@ -174,7 +174,7 @@ class MainActivity : Activity() {
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 try {
                     fun read(field: EditText, range: IntRange): Int = field.text.toString().toInt().also { require(it in range) }
-                    val draft = repo.session.options.copy(restSeconds = restSeconds?.let { read(it, 1..600) } ?: o.restSeconds, sittingMinutes = read(sittingMins, 1..480), workMinutes = read(workMins, 1..720),
+                    val draft = repo.session.options.copy(restSeconds = read(restSeconds, 1..600), sittingMinutes = read(sittingMins, 1..480), workMinutes = read(workMins, 1..720),
                         nightHour = read(hour, 0..23), nightMinute = read(minute, 0..59), sittingEnabled = sitting.isChecked, workEnabled = work.isChecked,
                         nightEnabled = night.isChecked, soundEnabled = sound.isChecked, lightMode = light.isChecked, overlay = overlay.isChecked)
                     if (draft.overlay && !Settings.canDrawOverlays(this)) { toast("请先授权悬浮窗权限"); return@setOnClickListener }
