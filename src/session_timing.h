@@ -16,12 +16,22 @@ class SessionTiming {
 public:
     bool locked = false, sleeping = false;
     bool recoverHealth = true;
+    bool externalAuthority = false;
     std::function<void(std::uint64_t,std::uint64_t)> onActive;
     SessionTiming(BreakTimer& e, HealthReminders& h, const ReminderSettings& s, std::uint64_t now)
         : eye(e), health(h), settings(s), previous(now) {}
     bool blocked() const { return locked || sleeping; }
+    void resumeLocal(std::uint64_t now) {
+        previous=now; health.previous=now; externalAuthority=false;
+        if(blocked()) {
+            preservePause=eye.state==BreakTimer::State::Paused;
+            preserveWaiting=eye.state==BreakTimer::State::Waiting || eye.state==BreakTimer::State::Resting;
+            eye.away(now);
+        }
+    }
     void advance(std::uint64_t now) {
         if (now < previous) return;
+        if (externalAuthority) { previous=now; health.previous=now; return; }
         if (!blocked() && eye.state == BreakTimer::State::Working) {
             const auto end = std::min(now, eye.deadline);
             if (end > previous) {
@@ -39,7 +49,7 @@ public:
     void lock(std::uint64_t now) {
         if (locked) return;
         advance(now);
-        if (!sleeping) {
+        if (!sleeping && !externalAuthority) {
             preservePause = eye.state == BreakTimer::State::Paused;
             preserveWaiting = eye.state == BreakTimer::State::Waiting || eye.state == BreakTimer::State::Resting;
             eye.away(now);
@@ -49,12 +59,12 @@ public:
     void unlock(std::uint64_t now) {
         if (!locked) return;
         advance(now); locked = false;
-        if (!sleeping) restore(now);
+        if (!sleeping && !externalAuthority) restore(now);
     }
     void suspend(std::uint64_t now) {
         if (sleeping) return;
         advance(now);
-        if (!locked) {
+        if (!locked && !externalAuthority) {
             preservePause = eye.state == BreakTimer::State::Paused;
             preserveWaiting = eye.state == BreakTimer::State::Waiting || eye.state == BreakTimer::State::Resting;
             eye.away(now);
@@ -64,7 +74,7 @@ public:
     void wake(std::uint64_t now) {
         if (!sleeping) return;
         advance(now); sleeping = false;
-        if (!locked) restore(now);
+        if (!locked && !externalAuthority) restore(now);
     }
 private:
     void restore(std::uint64_t now) {

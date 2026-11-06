@@ -40,5 +40,12 @@ int main() {
     BreakTimer delayedEye(0); HealthReminders delayedHealth(0); SessionTiming delayed(delayedEye, delayedHealth, settings, 0);
     delayed.advance(BreakTimer::WorkMs + 15000);
     check(delayedHealth.sittingMs == BreakTimer::WorkMs, "delayed callbacks cannot add work beyond eye deadline");
+    BreakTimer sharedEye(0); HealthReminders sharedHealth(0); SessionTiming shared(sharedEye,sharedHealth,settings,0);
+    std::uint64_t recorded=0; shared.onActive=[&](std::uint64_t,std::uint64_t elapsed){recorded+=elapsed;};
+    shared.externalAuthority=true; shared.advance(10000); shared.lock(11000); shared.unlock(20000);
+    shared.suspend(21000); shared.wake(30000);
+    check(recorded==0 && sharedHealth.sittingMs==0 && sharedEye.state==BreakTimer::State::Working,"server authority prevents local accumulation and lock mutations");
+    shared.externalAuthority=false; shared.advance(31000);
+    check(recorded==1000,"returning local does not backfill shared interval");
     std::cout << "All unified timing and lock checks passed.\n";
 }
