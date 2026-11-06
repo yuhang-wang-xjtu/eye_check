@@ -1,0 +1,25 @@
+[Unit]
+Description=EyeBreak shared-session API
+After=network.target
+
+[Service]
+Type=simple
+User=eyebreak
+Group=eyebreak
+WorkingDirectory=/var/lib/eyebreak
+ExecStart=/usr/bin/python3 /opt/eyebreak/server.py --bind 127.0.0.1 --port 8765 --database /var/lib/eyebreak/session.sqlite --token-file /etc/eyebreak/token --timezone Asia/Shanghai
+Restart=on-failure
+RestartSec=3
+StateDirectory=eyebreak
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryMax=256M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

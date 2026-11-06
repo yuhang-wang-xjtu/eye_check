@@ -27,6 +27,18 @@ python3 server.py --database /path/to/private/session.sqlite --token-file /path/
 
 这是单用户、单进程参考服务；公网正式使用还需要部署层速率限制、进程管理、数据库备份。客户端不预置服务地址或访问令牌。
 
+### Ubuntu systemd 部署文件
+
+`deploy/` 提供服务、每日备份定时器和 Nginx 路径代理示例。服务以专用 `eyebreak` 用户运行，程序放在 `/opt/eyebreak/`，数据库放在 `/var/lib/eyebreak/session.sqlite`，令牌放在 `/etc/eyebreak/token`（仅 root 和服务用户可读）。服务仅监听 `127.0.0.1:8765`，不直接对公网开放。
+
+部署 `eyebreak-sync.service`、`eyebreak-backup.service` 和 `eyebreak-backup.timer` 到 `/etc/systemd/system/` 后执行 `systemctl daemon-reload`，启用同步服务和备份 timer。`backup.py` 使用 SQLite 在线备份接口，保留最近 14 份备份；实际运营还应将备份复制到其他存储。
+
+Nginx 在已有 HTTPS 站点中代理 `/eyebreak/`，两端填写的服务器根地址应为 `https://sync.example.com/eyebreak`，不要附加 `/v1`。应在 Nginx HTTP 配置层设置限速，并配置 TLS 自动续期及成功续期后的 Nginx reload。已有站点修改前需要备份配置，并通过 `nginx -t` 后 reload。
+
+若 HTTP 证书验证被域名拦截页或代理干扰，可改用 DNS-01 验证。手动添加 TXT 取得的证书并不会因启用了 Certbot timer 就自动续期；还需配置 DNS 服务商 API 认证 hook，或每次到期前重新完成手动验证。DNS API 凭据应单独保存为 root 可读文件，不提交源码。
+
+`GET /health` 不需要令牌，仅返回 `{"status":"ok","protocol":1}`，不读取或创建会话。公网对应 `/eyebreak/health`；会话和统计接口仍必须携带令牌。Windows 客户端接入、离线合并和历史导入仍未实现。
+
 ## 协议 v1
 
 所有请求使用 `Authorization: Bearer <token>`，不将令牌放入 URL。会话标识为 8–80 位字母、数字、下划线或横线；同一令牌供本人的各设备使用，不是多用户登录系统。

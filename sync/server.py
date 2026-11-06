@@ -197,6 +197,8 @@ def handler(store, token):
 
         def handle_request(self, post):
             self.connection.settimeout(10)
+            if not post and self.path == "/health":
+                self.reply(200, {"status": "ok", "protocol": 1}); return
             auth = self.headers.get("Authorization", "")
             if not hmac.compare_digest(auth.encode(), ("Bearer " + token).encode()):
                 self.reply(401, {"error": "unauthorized"}); return

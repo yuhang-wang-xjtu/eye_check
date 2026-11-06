@@ -84,6 +84,8 @@ class Tests(unittest.TestCase):
         worker = threading.Thread(target=http.serve_forever,daemon=True); worker.start()
         url=f"http://127.0.0.1:{http.server_port}/v1/sessions/{self.room}"
         try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{http.server_port}/health") as health:
+                self.assertEqual(json.load(health), {"status":"ok", "protocol":1})
             with self.assertRaises(urllib.error.HTTPError) as denied: urllib.request.urlopen(url)
             self.assertEqual(denied.exception.code,401)
             request=urllib.request.Request(url,headers={"Authorization":"Bearer a-test-token-with-32-characters"})
