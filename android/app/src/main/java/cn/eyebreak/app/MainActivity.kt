@@ -113,8 +113,8 @@ class MainActivity : Activity() {
     }
     private fun render() {
         val s = repo.session
-        restHelp.text = if (repo.sync.enabled) "远眺约 6 米 · 共享周期由服务器统一结算" else "远眺约 6 米 · 自动休息 ${s.options.restSeconds} 秒"
-        usageHelp.text = if (repo.sync.enabled) "共享模式按服务器周期计时；亮屏在线时休息完成自动继续，手机熄屏不暂停其他设备。到点只发送通知。" else
+        restHelp.text = "远眺约 6 米 · 自动休息 ${s.options.restSeconds} 秒"
+        usageHelp.text = if (repo.sync.enabled) "手机独立计时：亮屏使用，熄屏休息，不控制电脑。同步统计对重叠使用时段去重。到点及休息结束只发送通知。" else
             "到点自动休息，休息期间不累计使用时长；开始和结束均通知。休息结束后亮屏自动继续，熄屏按 5:1 回补，不弹确认框。"
         phase.text = Alerts.phaseText(s.phase)
         countdown.text = if (s.phase == Phase.WAITING) "00:00" else Alerts.clock(s.remainingAt(repo.now()))

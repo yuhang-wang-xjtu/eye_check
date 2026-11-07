@@ -206,6 +206,7 @@ int main(int argc, char** argv) {
     auto localDays=dailyUsage.days;
     syncHasSnapshot=true; syncOnline=false; syncNextPoll=GetTickCount64()+60000;
     syncSnapshot.state=State::Working; syncSnapshot.remaining=BreakTimer::WorkMs;
+    syncSnapshot.available=true;
     syncSnapshot.serverNow=1800000000000ULL; syncSnapshot.deadline=syncSnapshot.serverNow-1;
     syncSnapshot.usage.days[visibleDay()]=12000;
     syncReceived=GetTickCount64();
@@ -215,8 +216,11 @@ int main(int argc, char** argv) {
     check(!syncCanCommand(),"offline shared state cannot submit stale commands");
     check(!IsWindowEnabled(toggleButton),"offline controls disabled");
     SendMessageW(window,WM_WTSSESSION_CHANGE,WTS_SESSION_LOCK,0);
-    check(timer.state==State::Working,"local lock cannot pause phone shared session");
+    projectSync(GetTickCount64());
+    check(timer.state==State::Away && pendingUnavailable,"local lock immediately gates this computer and queues its observation");
     SendMessageW(window,WM_WTSSESSION_CHANGE,WTS_SESSION_UNLOCK,0);
+    check(pendingUnavailable,"unlock before network confirmation cannot discard the lock event");
+    pendingUnavailable=false;
     syncSnapshot.state=State::Away; syncSnapshot.remaining=600000; syncSnapshot.sitting=50000; syncSnapshot.work=60000;
     syncReceived=GetTickCount64()-1000; syncOnline=true;
     projectSync(GetTickCount64());
@@ -226,7 +230,7 @@ int main(int argc, char** argv) {
     SharedSync::Result done; done.ok=true; done.status=200; done.received=GetTickCount64(); done.snapshot=syncSnapshot;
     done.snapshot.state=State::Waiting; done.snapshot.settings=settings;
     std::promise<SharedSync::Result> resultPromise; syncFuture=resultPromise.get_future(); requestGeneration=syncGeneration;
-    resultPromise.set_value(done); pumpSync(GetTickCount64());
+    requestObservation=false; resultPromise.set_value(done); pumpSync(GetTickCount64());
     check(timer.state==State::Waiting && completionAlerts==beforeSharedCompletion+1,"server rest completion notifies and stays waiting");
     pumpSync(GetTickCount64());
     check(timer.state==State::Waiting && completionAlerts==beforeSharedCompletion+1,"repainting shared waiting never resumes or repeats sound");

@@ -14,7 +14,11 @@
 
 namespace SharedSync {
 using Json=nlohmann::json;
-struct Config { std::wstring url,room,token; bool enabled=false; };
+struct Config { std::wstring url,room,token; bool enabled=false; std::wstring device; };
+inline std::wstring newDeviceId() {
+    GUID id{}; if(FAILED(CoCreateGuid(&id))) throw std::runtime_error("uuid");
+    wchar_t text[40]{}; StringFromGUID2(id,text,40); return std::wstring(text+1,36);
+}
 struct Handle {
     HINTERNET value;
     explicit Handle(HINTERNET v):value(v) { if(!v) throw std::runtime_error("network"); }
@@ -63,7 +67,7 @@ inline std::uint64_t dateDay(const std::string& date) {
 struct Snapshot {
     Json raw; std::uint64_t serverNow=0,revision=0,deadline=0,remaining=0,sitting=0,work=0;
     BreakTimer::State state=BreakTimer::State::Working;
-    AppSettings settings; DailyUsage usage; bool sittingSent=false,workSent=false; std::string night,zone;
+    AppSettings settings; DailyUsage usage; bool sittingSent=false,workSent=false,available=false; std::string night,zone;
 };
 inline Snapshot parse(const std::string& body) {
     if(body.size()>1024*1024) throw std::runtime_error("size");
@@ -88,6 +92,7 @@ inline Snapshot parse(const std::string& body) {
     auto flag=[](const Json& a,const char* key){ if(!a.at(key).is_boolean()) throw std::runtime_error("boolean"); return a.at(key).get<bool>(); };
     r.settings.sittingEnabled=flag(o,"sittingEnabled"); r.settings.workEnabled=flag(o,"workEnabled"); r.settings.nightEnabled=flag(o,"nightEnabled");
     r.sittingSent=flag(s,"sittingSent"); r.workSent=flag(s,"workSent"); r.night=s.at("lastNight").get<std::string>();
+    if(s.contains("available")) r.available=flag(s,"available");
     if(!r.night.empty()) dateDay(r.night);
     r.zone=s.at("zone").get<std::string>();
     // The deployed shared session and its calendar are explicitly China time.
@@ -111,7 +116,8 @@ inline Result request(const Config& c,const Json& command=Json()) {
         if(!WinHttpCrackUrl(c.url.c_str(),0,0,&u)) throw std::runtime_error("url");
         std::wstring host(u.lpszHostName,u.dwHostNameLength),path(u.lpszUrlPath,u.dwUrlPathLength);
         while(!path.empty() && path.back()==L'/') path.pop_back();
-        path+=L"/v1/sessions/"+c.room; if(!command.is_null()) path+=L"/commands";
+        if(c.device.empty() || c.device.size()>80 || c.device.find_first_not_of(L"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_")!=std::wstring::npos) throw std::runtime_error("device");
+        path+=L"/v2/sessions/"+c.room+L"/devices/"+c.device; if(!command.is_null()) path+=L"/commands";
         Handle session(WinHttpOpen(L"EyeBreak/0.3",WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,WINHTTP_NO_PROXY_NAME,WINHTTP_NO_PROXY_BYPASS,0));
         WinHttpSetTimeouts(session,1500,1500,2000,2500);
         Handle connection(WinHttpConnect(session,host.c_str(),u.nPort,0));
@@ -130,6 +136,7 @@ inline Result request(const Config& c,const Json& command=Json()) {
             if(!WinHttpReadData(req,buffer,sizeof(buffer),&read) || response.size()+read>1024*1024 || GetTickCount64()-start>10000) throw std::runtime_error("response");
             response.append(buffer,read);
         } while(read);
+        if(Json::parse(response).value("protocol",0)!=2) throw std::runtime_error("protocol");
         r.snapshot=parse(response); r.received=GetTickCount64(); r.ok=true;
     } catch(...) { r.error=L"连接失败或服务器数据无效；已保留本地记录"; }
     return r;
@@ -150,11 +157,13 @@ inline bool saveConfig(const std::wstring& dir,const Config& c) {
     const auto file=dir+L"\\sync-token.bin",tmp=file+L".tmp";
     std::ofstream stream(std::filesystem::path(tmp),std::ios::binary|std::ios::trunc); stream.write(reinterpret_cast<char*>(out.pbData),out.cbData); stream.close(); LocalFree(out.pbData);
     if(!stream || !MoveFileExW(tmp.c_str(),file.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)) return false;
-    return WritePrivateProfileStringW(L"Sync",L"Url",c.url.c_str(),ini.c_str()) && WritePrivateProfileStringW(L"Sync",L"Room",c.room.c_str(),ini.c_str()) && WritePrivateProfileStringW(L"Sync",L"Enabled",L"1",ini.c_str());
+    return WritePrivateProfileStringW(L"Sync",L"Url",c.url.c_str(),ini.c_str()) && WritePrivateProfileStringW(L"Sync",L"Room",c.room.c_str(),ini.c_str()) && WritePrivateProfileStringW(L"Sync",L"Device",c.device.c_str(),ini.c_str()) && WritePrivateProfileStringW(L"Sync",L"Enabled",L"1",ini.c_str());
 }
 inline Config loadConfig(const std::wstring& dir) {
     if(dir.empty()) return {};
     Config c; const auto ini=dir+L"\\sync.ini"; wchar_t text[2049]{};
+    GetPrivateProfileStringW(L"Sync",L"Device",L"",text,2049,ini.c_str()); c.device=text;
+    if(c.device.empty()) { c.device=newDeviceId(); WritePrivateProfileStringW(L"Sync",L"Device",c.device.c_str(),ini.c_str()); }
     GetPrivateProfileStringW(L"Sync",L"Url",L"",text,2049,ini.c_str()); c.url=text;
     GetPrivateProfileStringW(L"Sync",L"Room",L"",text,2049,ini.c_str()); c.room=text;
     std::ifstream f(std::filesystem::path(dir+L"\\sync-token.bin"),std::ios::binary); std::string bytes((std::istreambuf_iterator<char>(f)),{});

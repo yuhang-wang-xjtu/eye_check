@@ -81,7 +81,7 @@ INT_PTR CALLBACK usageProc(HWND dialog,UINT message,WPARAM w,LPARAM l) {
     if(message==WM_INITDIALOG || message==RefreshDialogDpi) {
         usageWindow=dialog; Theme::apply(dialog); Dpi::fitDialog(dialog);
         if(message==WM_INITDIALOG) {
-            if(sharedMode()) SetDlgItemTextW(dialog,IDC_USAGE_HELP,L"共享统计：只累计共享会话的工作状态，按北京时间分日。");
+            if(sharedMode()) SetDlgItemTextW(dialog,IDC_USAGE_HELP,L"同步汇总：各设备独立计时，重叠时段去重；按北京时间分日。");
             auto days=visibleUsage().days;
             days.emplace(visibleDay(),0);
             for(auto item=days.rbegin();item!=days.rend();++item) {
@@ -342,7 +342,7 @@ void restCompleted() {
     if (trayPresent) {
         NOTIFYICONDATAW n{}; n.cbSize = sizeof(n); n.hWnd = window; n.uID = 1; n.uFlags = NIF_INFO;
         wcscpy_s(n.szInfoTitle, L"休息完成");
-        wcscpy_s(n.szInfo, timer.state==BreakTimer::State::Working ? L"休息已结束，其他设备已继续共享计时。" : L"点击继续工作，或操作鼠标、键盘、手柄后开始下一轮计时。");
+        wcscpy_s(n.szInfo, timer.state==BreakTimer::State::Working ? L"本机休息已结束，已继续计时。" : L"点击继续工作，或操作本机鼠标、键盘、手柄后开始下一轮计时。");
         n.dwInfoFlags = NIIF_INFO | NIIF_NOSOUND; Shell_NotifyIconW(NIM_MODIFY, &n);
     }
     bringReminderForward(window);
@@ -661,6 +661,7 @@ LRESULT CALLBACK proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
             if (GetLastInputInfo(&input)) { timer.waitingInput = input.dwTime; timer.inputBaselineValid = true; }
         }
         inputBoundary=GetTickCount(); awayInputArmed=false;
+        syncAvailabilityChanged();
         Diagnostics::write(wparam==WTS_SESSION_LOCK?"session-lock":"session-unlock",beforeSession,timer.state);
         persistUsage(); refresh(); return 0;
     }
@@ -671,6 +672,7 @@ LRESULT CALLBACK proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
             sessionTiming.wake(GetTickCount64()); deviceInput.reset();
         }
         inputBoundary=GetTickCount(); awayInputArmed=false;
+        syncAvailabilityChanged();
         Diagnostics::write(wparam==PBT_APMSUSPEND?"suspend":"wake",beforePower,timer.state);
         persistUsage(); refresh();
         return TRUE;
@@ -694,7 +696,7 @@ LRESULT CALLBACK proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
         drawText(memory, titleFont, foreground, L"20 · 20 · 20", row(24,66));
         std::wstring subtitle = L"每 20 分钟，远眺约 6 米，休息 " + std::to_wstring(settings.restSeconds) + L" 秒";
         drawText(memory, captionFont, Theme::Muted, subtitle, row(73,103));
-        const wchar_t* status = sessionTiming.blocked() ? (syncActive?L"本机锁屏 / 睡眠中 · 共享会话由服务器保持":L"锁屏 / 睡眠中 · 三项按 5:1 回补") :
+        const wchar_t* status = sessionTiming.blocked() ? L"本机锁屏 / 睡眠中 · 三项按 5:1 回补" :
             timer.state == BreakTimer::State::Resting ? L"现在看向远处，让眼睛放松" :
             timer.state == BreakTimer::State::Waiting ? L"休息完成 · 点击继续，或操作鼠标 / 键盘 / 手柄" :
             timer.state == BreakTimer::State::Away ? L"休息回补中（5 倍）· 新操作后自动继续" :

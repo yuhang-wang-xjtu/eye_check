@@ -40,6 +40,9 @@ class Repository private constructor(val context: Context) {
         }
     }
     private var screenPolicy = ScreenUsagePolicy()
+    private var presence = DevicePresence()
+    private var resumeAfterScreenOn = false
+    private var nextPresenceRetry = 0L
     private fun interactive() = context.getSystemService(PowerManager::class.java).isInteractive
     @Volatile private var syncGeneration = 0
     fun now(atElapsed: Long = SystemClock.elapsedRealtime()) = baseWall + atElapsed - baseElapsed
@@ -61,16 +64,18 @@ class Repository private constructor(val context: Context) {
     fun tick() {
         val previousPhase = session.phase
         val at = now()
-        val delivered = if (sync.enabled) session.tick(at) else
-            screenPolicy.observe(session, interactive(), at) + screenPolicy.tick(session, at)
+        val on = interactive()
+        if (sync.enabled && presence.observe(on) && on) resumeAfterScreenOn = true
+        val delivered = if (sync.enabled) DeviceSyncPolicy.tick(session, on, at) else
+            screenPolicy.observe(session, on, at) + screenPolicy.tick(session, at)
         if (delivered.isNotEmpty() || previousPhase != session.phase) { save(); events(delivered) }
         if (SystemClock.elapsedRealtime() - lastSave > 15000) { save(); lastSave = SystemClock.elapsedRealtime() }
         emit()
-        if (sync.enabled && linked && !busy && session.phase == Phase.WAITING && interactive()) contact("continue")
+        if (sync.enabled && !busy && presence.needsReport() && SystemClock.elapsedRealtime() >= nextPresenceRetry) contact()
     }
     fun command(action: String, completed: (() -> Unit)? = null) {
         if (sync.enabled) {
-            if (!linked || busy) { syncStatus = "尚未连接；操作未提交，可重试连接或切换本地模式"; emit(); completed?.invoke(); return }
+            if (!linked || busy || presence.needsReport()) { syncStatus = "连接或屏幕状态同步中；操作未提交，请稍后重试"; emit(); completed?.invoke(); return }
             contact(action, completed = completed); return
         }
         tick() // Deliver any deadline event before a button action settles the model.
@@ -87,14 +92,15 @@ class Repository private constructor(val context: Context) {
         } else { tick(); session.options = options; save(); emit() }
     }
     fun observeScreen(screenOn: Boolean) {
-        // A phone screen-off cannot pause a session still active on another device.
-        if (sync.enabled) { if (screenOn) contact(); return }
-        val delivered = screenPolicy.observe(session, screenOn, now())
+        if (sync.enabled && presence.observe(screenOn) && screenOn) resumeAfterScreenOn = true
+        val delivered = if (sync.enabled) DeviceSyncPolicy.tick(session, screenOn, now()) else screenPolicy.observe(session, screenOn, now())
         save(); if (delivered.isNotEmpty()) events(delivered); emit()
+        if (sync.enabled) contact()
     }
     fun connect() {
         if(!sync.enabled) { session.command("pause",now()); save() }
         syncGeneration++; busy=false
+        presence = DevicePresence(); presence.observe(interactive()); resumeAfterScreenOn = interactive(); nextPresenceRetry = 0
         sync.enable(true); linked=false; contact()
     }
     fun disconnect() {
@@ -107,31 +113,44 @@ class Repository private constructor(val context: Context) {
         busy = true
         val generation = syncGeneration
         val revision = session.revision
+        presence.observe(interactive())
+        val sentAvailable = presence.nextAvailable()
+        val sentEpoch = presence.epoch
         executor.execute {
             if(generation != syncGeneration) { main.post { completed?.invoke() }; return@execute }
             try {
-                val reply = if (action == null) sync.fetch() else sync.send(action, revision, options)
+                val reply = if (action == null) sync.fetch(sentAvailable, revision) else sync.send(action, revision, options)
                 main.post {
                     if(generation != syncGeneration || !sync.enabled) { completed?.invoke(); return@post }
+                    if (action == null) presence.acknowledge(sentAvailable, sentEpoch)
+                    if (presence.needsReport()) {
+                        busy = false; nextPresenceRetry = 0; contact(); completed?.invoke(); return@post
+                    }
                     try {
                         val previous = session
                         session = SessionJson.decode(reply.snapshot, options ?: session.options)
                         baseWall = reply.serverNow; baseElapsed = reply.receivedElapsed
                         val events = mutableListOf<String>()
                         if(previous.phase != session.phase && session.phase == Phase.RESTING) events += "REST_START"
-                        if(previous.phase != session.phase && session.phase == Phase.WAITING) events += "REST_END"
+                        if(previous.phase != session.phase && (session.phase == Phase.WAITING ||
+                            (previous.phase == Phase.RESTING && reply.serverNow >= previous.deadline && session.phase == Phase.AWAY))) events += "REST_END"
                         if(!previous.sittingSent && session.sittingSent) events += "SITTING"
                         if(!previous.workSent && session.workSent) events += "LONG_WORK"
                         if(previous.lastNight != session.lastNight && session.lastNight.isNotEmpty()) events += "LATE_NIGHT"
                         if(events.isNotEmpty()) events(events)
-                        linked = true; syncStatus = if (reply.conflict) "其他设备已更改状态，已刷新；请重新操作" else "已同步 · 共享会话 ${sync.room}"
+                        linked = true; syncStatus = if (reply.conflict) "本机状态已刷新，请重新操作" else "已同步 · 手机独立计时，设置与统计共享"
+                        if (!interactive() && session.phase == Phase.WORKING) session.command("rest", now())
                         save()
                     } catch (_: Exception) { linked = false; syncStatus = "服务器数据格式不匹配" }
                     busy = false; emit(); completed?.invoke()
+                    if (linked && presence.mayResume() && (session.phase == Phase.WAITING ||
+                        (resumeAfterScreenOn && session.phase in listOf(Phase.AWAY, Phase.PAUSED)))) {
+                        resumeAfterScreenOn = false; contact("continue")
+                    } else if (session.phase == Phase.WORKING) resumeAfterScreenOn = false
                 }
             } catch (e: Exception) {
                 main.post {
-                    if(generation == syncGeneration && sync.enabled) { linked = false; busy = false; syncStatus = e.message?.take(160) ?: "连接失败"; emit() }
+                    if(generation == syncGeneration && sync.enabled) { linked = false; busy = false; resumeAfterScreenOn = interactive(); nextPresenceRetry = SystemClock.elapsedRealtime()+5000; syncStatus = e.message?.take(160) ?: "连接失败"; emit() }
                     completed?.invoke()
                 }
             }

@@ -18,6 +18,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 WORK_MS = 1_200_000
+LEASE_MS = 30000
 DEFAULTS = dict(restSeconds=25, sittingMinutes=60, workMinutes=120, nightHour=23,
                 nightMinute=0, sittingEnabled=True, workEnabled=True, nightEnabled=True)
 
@@ -148,6 +149,11 @@ class Store:
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, state TEXT NOT NULL)")
         self.db.execute("CREATE TABLE IF NOT EXISTS operations (room TEXT, id TEXT, fingerprint TEXT, PRIMARY KEY(room,id))")
+        self.db.execute("CREATE TABLE IF NOT EXISTS device_sessions (room TEXT, device TEXT, state TEXT NOT NULL, PRIMARY KEY(room,device))")
+        self.db.execute("CREATE TABLE IF NOT EXISTS device_operations (room TEXT, device TEXT, id TEXT, fingerprint TEXT, created INTEGER NOT NULL, PRIMARY KEY(room,device,id))")
+        self.db.execute("CREATE INDEX IF NOT EXISTS device_operation_age ON device_operations(room,device,created)")
+        self.db.execute("CREATE TABLE IF NOT EXISTS shared_rooms (room TEXT PRIMARY KEY, settings TEXT NOT NULL, legacy TEXT NOT NULL)")
+        self.db.execute("CREATE TABLE IF NOT EXISTS usage_intervals (room TEXT, day TEXT, intervals TEXT NOT NULL, PRIMARY KEY(room,day))")
         self.db.commit()
         self.lock = threading.Lock()
 
@@ -179,6 +185,123 @@ class Store:
             self.db.execute("INSERT OR REPLACE INTO sessions VALUES (?,?)", (room, json.dumps(s)))
             return status, dict(serverNowMs=now, snapshot=copy.deepcopy(s), events=events)
 
+    def record_interval(self, room, start, end):
+        """Union of confirmed device work, split by day, never summed twice."""
+        zone = ZoneInfo(self.zone)
+        while start < end:
+            local = datetime.fromtimestamp(start / 1000, zone)
+            midnight = datetime.combine(local.date() + timedelta(days=1), datetime.min.time(), zone)
+            stop = min(end, int(midnight.timestamp() * 1000))
+            day = local.date().isoformat()
+            row = self.db.execute("SELECT intervals FROM usage_intervals WHERE room=? AND day=?", (room, day)).fetchone()
+            ranges = json.loads(row[0]) if row else []
+            ranges.append([start, stop])
+            merged = []
+            for left, right in sorted(ranges):
+                if merged and left <= merged[-1][1]:
+                    merged[-1][1] = max(merged[-1][1], right)
+                else:
+                    merged.append([left, right])
+            self.db.execute("INSERT OR REPLACE INTO usage_intervals VALUES (?,?,?)", (room, day, json.dumps(merged)))
+            start = stop
+
+    def settle_device(self, room, s, now):
+        previous = s["updatedAtMs"]
+        cutoff = max(previous, min(now, s["leaseUntilMs"])) if s["available"] else previous
+        if s["state"] == "WORKING" and s["available"]:
+            self.record_interval(room, previous, min(cutoff, s["deadlineMs"]))
+        events = settle(s, cutoff)
+        # Expired availability never proves that the user has returned.
+        if s["available"] and now >= s["leaseUntilMs"]:
+            s["available"] = False
+            if s["state"] == "WORKING":
+                apply_command(s, "rest", cutoff)
+        if not s["available"]:
+            if s["state"] == "RESTING":
+                recovery = max(0, min(now, s["deadlineMs"]) - s["updatedAtMs"]) * 5
+                s["sittingMs"] = max(0, s["sittingMs"] - recovery)
+                s["workMs"] = max(0, s["workMs"] - recovery)
+            events += settle(s, now)
+            if s["platform"] == "android" and s["state"] == "WAITING":
+                apply_command(s, "rest", now)
+        elif cutoff < now:
+            events += settle(s, now)
+        return list(dict.fromkeys(events))
+
+    def device_request(self, room, device, command=None):
+        if not re.fullmatch(r"[a-zA-Z0-9_-]{8,80}", room) or not re.fullmatch(r"[a-zA-Z0-9_-]{8,80}", device):
+            raise ValueError("invalid identity")
+        with self.lock, self.db:
+            now = self.clock()
+            shared = self.db.execute("SELECT settings,legacy FROM shared_rooms WHERE room=?", (room,)).fetchone()
+            if not shared:
+                old = self.db.execute("SELECT state FROM sessions WHERE id=?", (room,)).fetchone()
+                old = json.loads(old[0]) if old else None
+                options, legacy = (old["settings"], old["usage"]) if old else (DEFAULTS.copy(), {})
+                self.db.execute("INSERT INTO shared_rooms VALUES (?,?,?)", (room, json.dumps(options), json.dumps(legacy)))
+            else:
+                options, legacy = json.loads(shared[0]), json.loads(shared[1])
+            rows = self.db.execute("SELECT device,state FROM device_sessions WHERE room=?", (room,)).fetchall()
+            states = {key: json.loads(value) for key, value in rows}
+            if device not in states:
+                if len(states) >= 32:
+                    raise ValueError("too many devices")
+                s = new_session(now, self.zone)
+                s.update(state="WAITING", settings=options.copy(), available=False, leaseUntilMs=now, platform="windows")
+                states[device] = s
+            events = []
+            for key, value in states.items():
+                due = self.settle_device(room, value, now)
+                if key == device:
+                    events = due
+            s = states[device]
+            status = 200
+            if command is not None:
+                if not isinstance(command, dict) or type(command.get("expectedRevision")) is not int:
+                    raise ValueError("expectedRevision required")
+                operation = command.get("operationId", "")
+                if not isinstance(operation, str) or not re.fullmatch(r"[a-zA-Z0-9_-]{8,100}", operation):
+                    raise ValueError("invalid operation")
+                fingerprint = json.dumps(command, sort_keys=True, separators=(",", ":"))
+                prior = self.db.execute("SELECT fingerprint FROM device_operations WHERE room=? AND device=? AND id=?", (room, device, operation)).fetchone()
+                action = command.get("action")
+                if prior:
+                    if prior[0] != fingerprint:
+                        raise ValueError("operation reused")
+                elif action != "observe" and command["expectedRevision"] != s["revision"]:
+                    status = 409
+                else:
+                    if action == "observe":
+                        available, platform = command.get("available"), command.get("platform")
+                        if type(available) is not bool or platform not in ("windows", "android"):
+                            raise ValueError("invalid observation")
+                        s["platform"] = platform
+                        if not available and (s["state"] == "WORKING" or (platform == "android" and s["state"] in ("PAUSED", "WAITING"))):
+                            apply_command(s, "rest", now)
+                        s["available"] = available
+                        s["leaseUntilMs"] = now + LEASE_MS if available else now
+                    elif action == "settings":
+                        validate_options(command.get("settings"))
+                        options = command["settings"]
+                        for value in states.values():
+                            apply_command(value, "settings", now, options)
+                        self.db.execute("UPDATE shared_rooms SET settings=? WHERE room=?", (json.dumps(options), room))
+                    else:
+                        if not s["available"] and action in ("continue", "skip"):
+                            raise ValueError("inactive device cannot work")
+                        apply_command(s, action, now)
+                    self.db.execute("INSERT INTO device_operations VALUES (?,?,?,?,?)", (room, device, operation, fingerprint, now))
+            self.db.execute("DELETE FROM device_operations WHERE room=? AND device=? AND created<?", (room, device, now-86400000))
+            for key, value in states.items():
+                self.db.execute("INSERT OR REPLACE INTO device_sessions VALUES (?,?,?)", (room, key, json.dumps(value)))
+            usage = legacy.copy()
+            for day, intervals in self.db.execute("SELECT day,intervals FROM usage_intervals WHERE room=?", (room,)):
+                usage[day] = min(86400000, usage.get(day, 0) + sum(end - start for start, end in json.loads(intervals)))
+            snapshot = copy.deepcopy(s)
+            snapshot["deviceUsage"] = snapshot["usage"]
+            snapshot["usage"] = usage
+            return status, dict(protocol=2, serverNowMs=now, snapshot=snapshot, events=events)
+
 
 def handler(store, token):
     class Handler(BaseHTTPRequestHandler):
@@ -204,7 +327,9 @@ def handler(store, token):
                 self.reply(401, {"error": "unauthorized"}); return
             pattern = r"/v1/sessions/([a-zA-Z0-9_-]{8,80})" + (r"/commands" if post else "")
             matched = re.fullmatch(pattern, self.path)
-            if not matched:
+            device_pattern = r"/v2/sessions/([a-zA-Z0-9_-]{8,80})/devices/([a-zA-Z0-9_-]{8,80})" + (r"/commands" if post else "")
+            device_match = re.fullmatch(device_pattern, self.path)
+            if not matched and not device_match:
                 self.reply(404, {"error": "not found"}); return
             try:
                 command = None
@@ -213,7 +338,7 @@ def handler(store, token):
                     if not 0 < size <= 65536:
                         raise ValueError("request body must be 1–65536 bytes")
                     command = json.loads(self.rfile.read(size))
-                code, body = store.request(matched[1], command)
+                code, body = store.device_request(device_match[1], device_match[2], command) if device_match else store.request(matched[1], command)
                 self.reply(code, body)
             except (ValueError, KeyError, TypeError, OverflowError):
                 self.reply(400, {"error": "invalid request or action not available"})

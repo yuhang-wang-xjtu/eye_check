@@ -19,6 +19,7 @@ import javax.crypto.spec.GCMParameterSpec
 data class SyncReply(val snapshot: JSONObject, val serverNow: Long, val conflict: Boolean, val receivedElapsed: Long)
 class SyncClient(context: Context) {
     private val prefs = context.getSharedPreferences("sync", Context.MODE_PRIVATE)
+    private val device = prefs.getString("deviceV2", null) ?: UUID.randomUUID().toString().also { prefs.edit().putString("deviceV2", it).apply() }
     var baseUrl: String
         get() = prefs.getString("url", "") ?: ""
         set(value) { prefs.edit().putString("url", value.trimEnd('/')).apply() }
@@ -55,7 +56,11 @@ class SyncClient(context: Context) {
             "远程同步需要 HTTPS；HTTP 仅允许本地开发服务器"
         }
     }
-    fun fetch(): SyncReply = request(null)
+    fun fetch(available: Boolean, revision: Long): SyncReply {
+        val body = JSONObject().put("action", "observe").put("expectedRevision", revision)
+            .put("operationId", UUID.randomUUID().toString()).put("available", available).put("platform", "android")
+        return request(body)
+    }
     fun send(action: String, revision: Long, options: Options? = null): SyncReply {
         val body = JSONObject().put("action", action).put("expectedRevision", revision).put("operationId", UUID.randomUUID().toString())
         if (options != null) body.put("settings", SessionJson.sharedOptions(options))
@@ -65,7 +70,7 @@ class SyncClient(context: Context) {
         validateUrl(baseUrl)
         require(room.matches(Regex("[a-zA-Z0-9_-]{8,80}"))) { "会话标识需为 8–80 位字母、数字或横线" }
         val suffix = if (body == null) "" else "/commands"
-        val connection = URL("$baseUrl/v1/sessions/$room$suffix").openConnection() as HttpURLConnection
+        val connection = URL("$baseUrl/v2/sessions/$room/devices/$device$suffix").openConnection() as HttpURLConnection
         try {
             connection.connectTimeout = 2500; connection.readTimeout = 3500; connection.instanceFollowRedirects = false
             connection.setRequestProperty("Authorization", "Bearer ${token()}")
@@ -87,6 +92,7 @@ class SyncClient(context: Context) {
             }
             require(bytes.size <= 1024 * 1024) { "服务器响应过大" }
             val result = JSONObject(String(bytes, Charsets.UTF_8))
+            require(result.optInt("protocol") == 2) { "服务器需要升级为独立设备同步协议" }
             return SyncReply(result.getJSONObject("snapshot"), result.getLong("serverNowMs"), status == 409, SystemClock.elapsedRealtime())
         } finally { connection.disconnect() }
     }

@@ -97,4 +97,81 @@ class Tests(unittest.TestCase):
             http.shutdown();http.server_close();worker.join()
 
 
+class DeviceTests(unittest.TestCase):
+    def setUp(self):
+        self.now = 1800000000000
+        self.store = server.Store(":memory:", clock=lambda: self.now)
+        self.room, self.pc, self.phone = "device-test-room", "windows-device-01", "android-device-01"
+        self.seq = 0
+    def tearDown(self): self.store.db.close()
+    def get(self, device): return self.store.device_request(self.room, device)[1]["snapshot"]
+    def cmd(self, device, action, **extra):
+        self.seq += 1
+        command = dict(action=action, expectedRevision=self.get(device)["revision"], operationId=f"device-op-{self.seq:08}", **extra)
+        return self.store.device_request(self.room, device, command)[1]["snapshot"]
+    def observe(self, device, available):
+        return self.cmd(device, "observe", available=available, platform="android" if device==self.phone else "windows")
+    def work(self, device):
+        self.observe(device, True)
+        return self.cmd(device, "continue")
+    def test_phone_never_resumes_pc(self):
+        self.work(self.pc); self.cmd(self.pc, "rest")
+        self.work(self.phone)
+        self.assertEqual(self.get(self.pc)["state"], "AWAY")
+        self.now += 10000
+        self.observe(self.phone, False)
+        self.assertEqual(self.get(self.phone)["state"], "AWAY")
+        self.assertEqual(self.get(self.pc)["state"], "AWAY")
+        self.now += 10000
+        self.assertEqual(self.get(self.phone)["workMs"], 0)
+        self.assertEqual(self.get(self.pc)["workMs"], 0)
+    def test_pc_activity_never_starts_off_phone(self):
+        self.work(self.phone); self.observe(self.phone, False)
+        self.work(self.pc)
+        self.assertEqual(self.get(self.phone)["state"], "AWAY")
+        self.observe(self.pc, False); self.observe(self.pc, True)
+        self.assertEqual(self.get(self.pc)["state"], "AWAY")
+    def test_overlapping_usage_is_union(self):
+        self.work(self.pc); self.work(self.phone)
+        self.now += 10000; self.observe(self.phone, False)
+        self.now += 5000; self.cmd(self.pc, "rest")
+        pc, phone = self.get(self.pc), self.get(self.phone)
+        self.assertEqual(sum(pc["usage"].values()), 15000)
+        self.assertEqual(sum(pc["deviceUsage"].values()), 15000)
+        self.assertEqual(sum(phone["deviceUsage"].values()), 10000)
+        self.assertEqual(pc["usage"], phone["usage"])
+    def test_disconnected_device_lease_expires(self):
+        self.work(self.phone)
+        self.now += 60000
+        s = self.get(self.phone)
+        self.assertEqual(s["state"], "AWAY")
+        self.assertEqual(sum(s["usage"].values()), server.LEASE_MS)
+        self.observe(self.phone, True)
+        self.assertEqual(self.get(self.phone)["state"], "AWAY")
+    def test_settings_shared_but_commands_independent(self):
+        self.work(self.pc); self.work(self.phone)
+        options = server.DEFAULTS.copy(); options["restSeconds"] = 37
+        self.cmd(self.pc, "settings", settings=options)
+        self.assertEqual(self.get(self.phone)["settings"]["restSeconds"], 37)
+        self.cmd(self.phone, "pause")
+        self.assertEqual(self.get(self.pc)["state"], "WORKING")
+    def test_off_phone_finishes_rest_without_work(self):
+        self.work(self.phone)
+        # Seed a near deadline rather than waiting twenty real minutes.
+        with self.store.db:
+            s = self.get(self.phone); s["usage"] = s.pop("deviceUsage")
+            s["deadlineMs"] = self.now+1000; s["settings"]["restSeconds"] = 2
+            self.store.db.execute("UPDATE device_sessions SET state=? WHERE room=? AND device=?",(json.dumps(s), self.room,self.phone))
+        self.now += 1000
+        self.assertEqual(self.get(self.phone)["state"], "RESTING")
+        self.observe(self.phone, False); self.now += 3000
+        self.assertEqual(self.get(self.phone)["state"], "AWAY")
+        self.assertEqual(sum(self.get(self.phone)["deviceUsage"].values()), 1000)
+    def test_legacy_state_does_not_control_new_devices(self):
+        self.store.request(self.room)
+        self.assertEqual(self.get(self.pc)["state"], "WAITING")
+        self.store.request(self.room,dict(action="pause",expectedRevision=0,operationId="legacy-pause-001"))
+        self.work(self.phone)
+        self.assertEqual(self.get(self.pc)["state"], "WAITING")
+
 if __name__=="__main__": unittest.main()

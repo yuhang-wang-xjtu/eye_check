@@ -62,7 +62,7 @@ BEGIN
     LTEXT "访问令牌（留空保留已保存的令牌）", -1, 12, 92, 286, 13
     EDITTEXT IDC_SYNC_TOKEN, 12, 108, 286, 20, ES_PASSWORD | ES_AUTOHSCROLL
     LTEXT "", IDC_SYNC_STATUS, 12, 135, 286, 28
-    LTEXT "共享倒计时、休息状态、提醒设置和统计；本机历史单独保留。", -1, 12, 166, 286, 26
+    LTEXT "各设备独立计时；同步提醒设置和使用统计。本机历史单独保留。", -1, 12, 166, 286, 26
     PUSHBUTTON "导入配置", IDC_SYNC_IMPORT, 12, 201, 65, 21
     PUSHBUTTON "连接并保存", IDC_SYNC_CONNECT, 82, 201, 74, 21
     PUSHBUTTON "切回本地", IDC_SYNC_LOCAL, 161, 201, 68, 21

@@ -4,6 +4,8 @@ SharedSync::Snapshot syncSnapshot;
 std::future<SharedSync::Result> syncFuture;
 std::uint64_t syncGeneration=0,requestGeneration=0,syncReceived=0,syncNextPoll=0;
 bool syncActive=false,syncOnline=false,syncHasSnapshot=false;
+bool pendingUnavailable=false,requestAvailable=false,requestObservation=false;
+std::uint64_t availabilityEpoch=0,requestAvailabilityEpoch=0,syncInactiveAt=0;
 std::wstring syncStatus=L"本地模式";
 HWND syncWindow=nullptr;
 BreakTimer localTimer(0);
@@ -11,7 +13,15 @@ HealthReminders localHealth(0);
 AppSettings localSettings;
 std::uint64_t localRemaining=0;
 bool syncBusy() { return syncFuture.valid(); }
-bool syncCanCommand() { return syncActive && syncOnline && syncHasSnapshot && !syncBusy(); }
+bool syncCanCommand() { return syncActive && syncOnline && syncHasSnapshot && syncSnapshot.available && !pendingUnavailable && !sessionTiming.blocked() && !syncBusy(); }
+void syncAvailabilityChanged() {
+    if(!syncActive) return;
+    if(sessionTiming.blocked()) {
+        if(!pendingUnavailable) syncInactiveAt=GetTickCount64();
+        pendingUnavailable=true; ++availabilityEpoch;
+    }
+    syncNextPoll=0;
+}
 void updateSyncStatus() {
     if(syncWindow) SetDlgItemTextW(syncWindow,IDC_SYNC_STATUS,syncStatus.c_str());
 }
@@ -34,6 +44,12 @@ void projectSync(std::uint64_t now) {
     } else if(timer.state==BreakTimer::State::Working) {
         const auto active=std::min(projected,left);
         health.sittingMs+=active; health.workMs+=active;
+        if(sessionTiming.blocked() || pendingUnavailable) {
+            const auto before=syncInactiveAt>syncReceived?std::min(syncInactiveAt-syncReceived,left):0;
+            const auto recovery=now>syncInactiveAt?std::min<std::uint64_t>(now-syncInactiveAt,BreakTimer::WorkMs)*5:0;
+            timer.state=BreakTimer::State::Away; timer.remaining=std::min(BreakTimer::WorkMs,left-before+recovery);
+            health.sittingMs=syncSnapshot.sitting+before; health.workMs=syncSnapshot.work+before; health.recover(recovery,settings);
+        }
     }
 }
 const DailyUsage& visibleUsage() { return syncActive?syncSnapshot.usage:dailyUsage; }
@@ -46,7 +62,8 @@ void enterShared() {
     if(syncActive) return;
     const auto now=GetTickCount64(); sessionTiming.advance(now); persistUsage();
     localTimer=timer; localHealth=health; localSettings=settings; localRemaining=timer.left(now);
-    syncActive=true; sessionTiming.externalAuthority=true;
+    syncActive=true; sessionTiming.externalAuthority=true; pendingUnavailable=false;
+    if(sessionTiming.blocked()) { pendingUnavailable=true; syncInactiveAt=now; ++availabilityEpoch; }
     timer.state=BreakTimer::State::Paused; syncHasSnapshot=false;
     if(healthWindow) DestroyWindow(healthWindow);
     releaseReminderWindow();
@@ -68,7 +85,10 @@ bool launchSync(const SharedSync::Json& command=SharedSync::Json()) {
     if(syncBusy() || !syncActive) return false;
     requestGeneration=syncGeneration;
     const auto config=syncConfig;
-    try { syncFuture=std::async(std::launch::async,[config,command]{return SharedSync::request(config,command);}); }
+    auto body=command;
+    requestObservation=body.is_null(); requestAvailable=!pendingUnavailable && !sessionTiming.blocked(); requestAvailabilityEpoch=availabilityEpoch;
+    if(requestObservation) { body=SharedSync::makeCommand("observe",syncHasSnapshot?syncSnapshot.revision:0); body["available"]=requestAvailable; body["platform"]="windows"; }
+    try { syncFuture=std::async(std::launch::async,[config,body]{return SharedSync::request(config,body);}); }
     catch(...) { syncOnline=false; syncStatus=L"无法启动同步任务"; updateSyncStatus(); return false; }
     if(window) refresh();
     return true;
@@ -83,6 +103,7 @@ void pumpSync(std::uint64_t now) {
         if(requestGeneration==syncGeneration && syncActive) {
             syncOnline=result.ok;
             if(result.ok) {
+                if(requestObservation && !requestAvailable && requestAvailabilityEpoch==availabilityEpoch) pendingUnavailable=false;
                 const bool had=syncHasSnapshot;
                 const auto old=syncSnapshot;
                 syncSnapshot=std::move(result.snapshot); syncReceived=result.received; syncHasSnapshot=true;
@@ -107,9 +128,9 @@ void pumpSync(std::uint64_t now) {
                     }
                 }
                 if(stateChanged && timer.state==BreakTimer::State::Working) releaseReminderWindow();
-                syncStatus=result.status==409?L"其他设备已更新；已读取最新状态，请重试操作":L"已连接 · 每 5 秒同步";
+                syncStatus=result.status==409?L"本机状态已更新，请重试操作":L"已连接 · 本机独立计时，设置与统计同步";
             } else syncStatus=result.error+L"；稍后自动重连";
-            syncNextPoll=now+5000; updateSyncStatus(); refresh();
+            syncNextPoll=result.ok && (pendingUnavailable || syncSnapshot.available!=!sessionTiming.blocked())?0:now+5000; updateSyncStatus(); refresh();
         }
     }
     if(!syncActive) return;
@@ -141,6 +162,7 @@ INT_PTR CALLBACK syncProc(HWND d,UINT msg,WPARAM w,LPARAM l) {
         case IDC_SYNC_CONNECT: {
             if(syncBusy()) { SetDlgItemTextW(d,IDC_SYNC_STATUS,L"正在连接，请稍后重试"); return TRUE; }
             SharedSync::Config draft{syncText(d,IDC_SYNC_URL),syncText(d,IDC_SYNC_ROOM),syncText(d,IDC_SYNC_TOKEN),true};
+            draft.device=syncConfig.device.empty()?SharedSync::newDeviceId():syncConfig.device;
             if(draft.token.empty()) draft.token=syncConfig.token;
             if(!SharedSync::valid(draft)) { SetDlgItemTextW(d,IDC_SYNC_STATUS,L"请检查 HTTPS 地址、8–80 位会话 ID 和令牌"); return TRUE; }
             if(!SharedSync::saveConfig(settingsDirectory,draft)) { SetDlgItemTextW(d,IDC_SYNC_STATUS,L"无法安全保存同步配置"); return TRUE; }

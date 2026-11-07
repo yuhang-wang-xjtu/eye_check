@@ -1,6 +1,6 @@
 # 共享会话 API 原型
 
-为 Android 原型提供可运行的共享会话参考接口，需自行部署。Windows 客户端暂未接入。
+为 Windows 和 Android 提供设备独立的倒计时、共同的提醒设置和汇总使用统计。v1 仅为旧客户端兼容，新版两端使用 v2。
 
 ## 本地运行
 
@@ -23,7 +23,7 @@ python3 server.py --init-token --token-file /path/to/private/token
 python3 server.py --database /path/to/private/session.sqlite --token-file /path/to/private/token --timezone Asia/Shanghai
 ```
 
-现有 HTTPS 反向代理将 `/v1/` 转发到 `http://127.0.0.1:8765/v1/`，保留 `Authorization`，禁用 API 缓存，请求体限制 64 KiB，设置连接/读取超时。访问入口需要有效 TLS 证书；客户端不忽略证书错误。不要直接公开原型 Python HTTP 端口。
+现有 HTTPS 反向代理需同时转发 `/v1/` 和 `/v2/` 到本地 API 对应路径（或整个 `/eyebreak/` 前缀），保留 `Authorization`，禁用 API 缓存，请求体限制 64 KiB，设置连接/读取超时。访问入口需要有效 TLS 证书；客户端不忽略证书错误。不要直接公开原型 Python HTTP 端口。
 
 这是单用户、单进程参考服务；公网正式使用还需要部署层速率限制、进程管理、数据库备份。客户端不预置服务地址或访问令牌。
 
@@ -37,9 +37,21 @@ Nginx 在已有 HTTPS 站点中代理 `/eyebreak/`，两端填写的服务器根
 
 若 HTTP 证书验证被域名拦截页或代理干扰，可改用 DNS-01 验证。手动添加 TXT 取得的证书并不会因启用了 Certbot timer 就自动续期；还需配置 DNS 服务商 API 认证 hook，或每次到期前重新完成手动验证。DNS API 凭据应单独保存为 root 可读文件，不提交源码。
 
-`GET /health` 不需要令牌，仅返回 `{"status":"ok","protocol":1}`，不读取或创建会话。公网对应 `/eyebreak/health`；会话和统计接口仍必须携带令牌。Windows 客户端接入、离线合并和历史导入仍未实现。
+`GET /health` 不需要令牌，保留旧版 `{"status":"ok","protocol":1}` 响应兼容，不表示仅支持 v1。公网对应 `/eyebreak/health`；会话和统计接口仍必须携带令牌。离线区间回填和旧本地历史导入尚未实现。
 
-## 协议 v1
+## 协议 v2：设备独立
+
+`GET /v2/sessions/{sessionId}/devices/{deviceId}` 读取本设备；`POST` 同一路径加 `/commands` 执行本设备命令。设备 ID 为持久的安装 UUID，不使用硬件标识，也不让用户手填。首次设备为 `WAITING`，不会继承其他设备正在工作的状态。原有 v1 命令、CAS 和 UUID 去重规则保留；版本号按设备隔离，修改共享设置会刷新各设备版本号。
+
+客户端每 5 秒 POST `{"action":"observe","available":true,"platform":"windows","expectedRevision":0,"operationId":"unique-uuid"}`；安卓使用 `platform:"android"`，亮屏为 true、熄屏为 false。Windows 锁屏 / 睡眠为 false，解锁为 true；true 只更新可用性，不替代本机输入证据，Windows 继续必须另发 `continue`。`observe` 不受旧 revision 限制，以免锁屏事件被 CAS 丢掉，但仍按 operationId 去重。客户端一次仅发一个请求，将未确认的离开事件排队，不能用后来亮屏覆盖尚未提交的熄屏。
+
+响应为 `protocol:2`、`serverNowMs`、本设备 `snapshot` 和 `events`；快照继承 v1 结构，并增加 `available`、`leaseUntilMs`、`platform`、`deviceUsage`（本设备每日累计）。`usage` 是会话内全部设备的工作区间并集，重叠区间只算一次。所有设备请求都只推进各自状态，手机自动继续不会改变电脑的状态。关闭手机屏幕时自动休息仍保留 REST_END；结束后手机保持回补，待手机亮屏且在线再继续。电脑等待状态持续到本机新输入或点击继续。
+
+可用性租约为 30 秒；心跳中断最多估计 30 秒后转入回补，重连本身不恢复 Windows。此机制限制后台被杀或离线的误计，不能回填失联期间的真实使用区间。共享设置、旧 v1 统计、各设备状态和日区间并集均保存在同一 SQLite 事务中。首次升级冻结 v1 既有统计为迁移前历史，不以旧活动状态初始化新设备。备份应在服务升级前执行；新建表不删除旧表，v1 路由继续可用。
+
+操作去重保存最近 24 小时，避免每五秒心跳使数据库永久增长；同一 ID 同一内容在此窗口内重试不重复执行。请求仍上限 64 KiB、响应上限 1 MiB；每会话最多 32 个设备。
+
+## 协议 v1（旧版兼容）
 
 所有请求使用 `Authorization: Bearer <token>`，不将令牌放入 URL。会话标识为 8–80 位字母、数字、下划线或横线；同一令牌供本人的各设备使用，不是多用户登录系统。
 
@@ -84,4 +96,4 @@ Nginx 在已有 HTTPS 站点中代理 `/eyebreak/`，两端填写的服务器根
 
 测试覆盖鉴权、跨天、重启保留、暂停回补、休息结束等待、并发冲突、幂等和双设备不重复统计。
 
-原型暂未实现：多用户/配对、离线区间合并、Windows 原生端接入、旧历史导入和正式运维。
+原型暂未实现：多用户/配对、离线区间合并、旧本地历史导入。
