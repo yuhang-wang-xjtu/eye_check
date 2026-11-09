@@ -62,11 +62,47 @@ BEGIN
     LTEXT "访问令牌（留空保留已保存的令牌）", -1, 12, 92, 286, 13
     EDITTEXT IDC_SYNC_TOKEN, 12, 108, 286, 20, ES_PASSWORD | ES_AUTOHSCROLL
     LTEXT "", IDC_SYNC_STATUS, 12, 135, 286, 28
-    LTEXT "各设备独立计时；同步提醒设置和使用统计。本机历史单独保留。", -1, 12, 166, 286, 26
+    LTEXT "状态独立、倒计时相同；任一设备使用就倒数，全部休息才回补。", -1, 12, 166, 286, 26
     PUSHBUTTON "导入配置", IDC_SYNC_IMPORT, 12, 201, 65, 21
     PUSHBUTTON "连接并保存", IDC_SYNC_CONNECT, 82, 201, 74, 21
     PUSHBUTTON "切回本地", IDC_SYNC_LOCAL, 161, 201, 68, 21
     DEFPUSHBUTTON "关闭", IDCANCEL, 234, 201, 64, 21
+END
+
+#include "app_version.h"
+1 VERSIONINFO
+FILEVERSION EYEBREAK_VERSION_NUMBERS
+PRODUCTVERSION EYEBREAK_VERSION_NUMBERS
+FILEOS 0x40004
+FILETYPE 0x1
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404b0"
+        BEGIN
+            VALUE "FileDescription", "20·20·20 护眼提醒\0"
+            VALUE "FileVersion", EYEBREAK_VERSION_TEXT ".0\0"
+            VALUE "ProductName", "EyeBreak\0"
+            VALUE "ProductVersion", EYEBREAK_VERSION_TEXT "\0"
+            VALUE "OriginalFilename", "EyeBreak.exe\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0804, 1200
+    END
+END
+
+IDD_UPDATE DIALOGEX 0, 0, 310, 145
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "检查更新"
+FONT UI_BODY_POINTS, UI_FONT_FACE
+BEGIN
+    LTEXT "", IDC_UPDATE_STATUS, 12, 12, 286, 43
+    LTEXT "新版按版本号保存，下载后校验 SHA-256；解压后退出旧版再运行新版，设置和记录保留。", -1, 12, 62, 286, 31
+    DEFPUSHBUTTON "检查更新", IDC_UPDATE_ACTION, 12, 111, 95, 21
+    PUSHBUTTON "GitHub 发布页", IDC_UPDATE_PAGE, 112, 111, 95, 21
+    PUSHBUTTON "关闭", IDCANCEL, 212, 111, 86, 21
 END
 
 IDD_USAGE DIALOGEX 0, 0, 289, 220

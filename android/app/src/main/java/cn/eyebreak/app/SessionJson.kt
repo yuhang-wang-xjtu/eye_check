@@ -13,6 +13,12 @@ object SessionJson {
         s.remaining = j.getLong("remainingMs"); s.sittingMs = j.getLong("sittingMs"); s.workMs = j.getLong("workMs")
         s.sittingSent = j.getBoolean("sittingSent"); s.workSent = j.getBoolean("workSent")
         s.lastNight = j.optString("lastNight"); s.zone = j.getString("zone"); s.revision = j.getLong("revision")
+        s.coordinated = j.has("deviceState")
+        if (s.coordinated) {
+            s.devicePhase = Phase.valueOf(j.getString("deviceState")); s.deviceRevision = j.getLong("deviceRevision")
+            s.restCycle = j.getLong("restCycle"); s.restFinished = j.getLong("restFinished")
+            require(s.restCycle >= s.restFinished && s.restFinished >= 0)
+        }
         val o = j.getJSONObject("settings")
         s.options = local.copy(restSeconds = o.getInt("restSeconds"), sittingMinutes = o.getInt("sittingMinutes"),
             workMinutes = o.getInt("workMinutes"), nightHour = o.getInt("nightHour"), nightMinute = o.getInt("nightMinute"),

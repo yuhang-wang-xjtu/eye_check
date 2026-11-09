@@ -23,7 +23,8 @@ object Alerts {
         val text = if (timer.countdown) {
             if (s.phase == Phase.WORKING) "剩余 ${clock(timer.remainingMs)} · 距离护眼休息" else "剩余 ${clock(timer.remainingMs)} · 请看向远处"
         } else if(s.phase == Phase.WAITING) "休息完成 · 亮屏后自动计时" else clock(timer.remainingMs)
-        val notification = Notification.Builder(c, STATUS).setSmallIcon(R.drawable.ic_notification).setContentTitle("20·20·20 · ${phaseText(s.phase)}")
+        val title = if(s.coordinated) (if(s.devicePhase==Phase.WORKING) "本机使用" else "本机休息")+" · "+(if(s.phase==Phase.AWAY) "共同回补" else "共同倒计时") else phaseText(s.phase)
+        val notification = Notification.Builder(c, STATUS).setSmallIcon(R.drawable.ic_notification).setContentTitle("20·20·20 · $title")
             .setContentText(text).setContentIntent(open(c)).setOnlyAlertOnce(true).setOngoing(true)
             .setShowWhen(false).setUsesChronometer(false)
         if(Build.VERSION.SDK_INT >= 31) notification.setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE)
@@ -47,7 +48,7 @@ object Alerts {
         val text = when (event) {
             "TEST" -> "这是一条测试提醒，不会改变倒计时"
             "REST_START" -> "请远眺约 6 米，休息 ${s.options.restSeconds} 秒；休息期间不累计使用时长"
-            "REST_END" -> if (s.phase == Phase.WORKING) "休息完成，已自动开始下一轮计时" else "休息完成，亮屏后自动继续计时"
+            "REST_END" -> if(s.coordinated) "休息已完成。任一设备使用时共同倒计时，全部休息才回补。" else if (s.phase == Phase.WORKING) "休息完成，已自动开始下一轮计时" else "休息完成，亮屏后自动继续计时"
             "SITTING" -> "请起身活动，也可以立即休息"
             "LONG_WORK" -> "请安排一段较长休息"
             else -> "已经进入深夜时段，请考虑结束工作"
@@ -107,12 +108,19 @@ class AlarmReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val repo = Repository.get(context)
         if (intent.action == "alarm") AlarmSchedule.fired()
-        if(intent.action != "alarm" && intent.action != null && repo.sync.enabled) {
+        if(intent.action != null && repo.sync.enabled) {
             val pending = goAsync()
-            repo.command(intent.action!!) {
+            val finished = {
                 AlarmSchedule.set(context,repo.session,repo.now())
-                Alerts.refresh(context,repo.session,repo.now()); pending.finish()
+                Alerts.refresh(context,repo.session,repo.now())
+                if(intent.action=="alarm" && !repo.running && BackgroundReminder.enabled(context)) {
+                    try { context.startForegroundService(Intent(context,ReminderService::class.java)) }
+                    catch(e: RuntimeException) { android.util.Log.w("EyeBreakService","Alarm delivered without service restart",e) }
+                }
+                pending.finish()
             }
+            if(intent.action=="alarm") { repo.tick(false); repo.contact(completed=finished) }
+            else repo.command(intent.action!!,finished)
             return
         }
         if (intent.action == "alarm") repo.tick() else intent.action?.let { repo.command(it) }
@@ -150,7 +158,7 @@ class ReminderService : Service() {
             lastTickElapsed=elapsed
             try {
                 repo.tick()
-                if (repo.sync.enabled && elapsed >= nextSync) { repo.contact(); nextSync = elapsed + 5000 }
+                if (repo.sync.enabled && elapsed >= nextSync) { repo.contact(); nextSync = elapsed + 1000 }
             } catch (e: RuntimeException) {
                 repo.lastError="后台刷新异常，请重新打开应用查看状态"
                 android.util.Log.e("EyeBreakService","Background refresh failed",e)

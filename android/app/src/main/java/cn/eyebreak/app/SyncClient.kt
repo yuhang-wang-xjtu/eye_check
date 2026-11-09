@@ -56,13 +56,14 @@ class SyncClient(context: Context) {
             "远程同步需要 HTTPS；HTTP 仅允许本地开发服务器"
         }
     }
-    fun fetch(available: Boolean, revision: Long): SyncReply {
+    fun fetch(available: Boolean, revision: Long, resume: Boolean = false): SyncReply {
         val body = JSONObject().put("action", "observe").put("expectedRevision", revision)
-            .put("operationId", UUID.randomUUID().toString()).put("available", available).put("platform", "android")
+            .put("operationId", UUID.randomUUID().toString()).put("available", available).put("platform", "android").put("resume",resume)
         return request(body)
     }
-    fun send(action: String, revision: Long, options: Options? = null): SyncReply {
+    fun send(action: String, revision: Long, options: Options? = null, deviceRevision: Long = 0): SyncReply {
         val body = JSONObject().put("action", action).put("expectedRevision", revision).put("operationId", UUID.randomUUID().toString())
+            .put("expectedDeviceRevision",deviceRevision)
         if (options != null) body.put("settings", SessionJson.sharedOptions(options))
         return request(body)
     }
@@ -70,7 +71,7 @@ class SyncClient(context: Context) {
         validateUrl(baseUrl)
         require(room.matches(Regex("[a-zA-Z0-9_-]{8,80}"))) { "会话标识需为 8–80 位字母、数字或横线" }
         val suffix = if (body == null) "" else "/commands"
-        val connection = URL("$baseUrl/v2/sessions/$room/devices/$device$suffix").openConnection() as HttpURLConnection
+        val connection = URL("$baseUrl/v3/sessions/$room/devices/$device$suffix").openConnection() as HttpURLConnection
         try {
             connection.connectTimeout = 2500; connection.readTimeout = 3500; connection.instanceFollowRedirects = false
             connection.setRequestProperty("Authorization", "Bearer ${token()}")
@@ -92,7 +93,7 @@ class SyncClient(context: Context) {
             }
             require(bytes.size <= 1024 * 1024) { "服务器响应过大" }
             val result = JSONObject(String(bytes, Charsets.UTF_8))
-            require(result.optInt("protocol") == 2) { "服务器需要升级为独立设备同步协议" }
+            require(result.optInt("protocol") == 3) { "服务器需要升级为共同倒计时协议" }
             return SyncReply(result.getJSONObject("snapshot"), result.getLong("serverNowMs"), status == 409, SystemClock.elapsedRealtime())
         } finally { connection.disconnect() }
     }

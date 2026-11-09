@@ -13,6 +13,11 @@ HealthReminders localHealth(0);
 AppSettings localSettings;
 std::uint64_t localRemaining=0;
 bool syncBusy() { return syncFuture.valid(); }
+BreakTimer::State interactionState() {
+    if(!syncActive) return timer.state;
+    if(sessionTiming.blocked() || pendingUnavailable) return BreakTimer::State::Away;
+    return syncHasSnapshot?syncSnapshot.deviceState:BreakTimer::State::Waiting;
+}
 bool syncCanCommand() { return syncActive && syncOnline && syncHasSnapshot && syncSnapshot.available && !pendingUnavailable && !sessionTiming.blocked() && !syncBusy(); }
 void syncAvailabilityChanged() {
     if(!syncActive) return;
@@ -44,12 +49,6 @@ void projectSync(std::uint64_t now) {
     } else if(timer.state==BreakTimer::State::Working) {
         const auto active=std::min(projected,left);
         health.sittingMs+=active; health.workMs+=active;
-        if(sessionTiming.blocked() || pendingUnavailable) {
-            const auto before=syncInactiveAt>syncReceived?std::min(syncInactiveAt-syncReceived,left):0;
-            const auto recovery=now>syncInactiveAt?std::min<std::uint64_t>(now-syncInactiveAt,BreakTimer::WorkMs)*5:0;
-            timer.state=BreakTimer::State::Away; timer.remaining=std::min(BreakTimer::WorkMs,left-before+recovery);
-            health.sittingMs=syncSnapshot.sitting+before; health.workMs=syncSnapshot.work+before; health.recover(recovery,settings);
-        }
     }
 }
 const DailyUsage& visibleUsage() { return syncActive?syncSnapshot.usage:dailyUsage; }
@@ -86,6 +85,7 @@ bool launchSync(const SharedSync::Json& command=SharedSync::Json()) {
     requestGeneration=syncGeneration;
     const auto config=syncConfig;
     auto body=command;
+    if(!body.is_null()) body["expectedDeviceRevision"]=syncSnapshot.deviceRevision;
     requestObservation=body.is_null(); requestAvailable=!pendingUnavailable && !sessionTiming.blocked(); requestAvailabilityEpoch=availabilityEpoch;
     if(requestObservation) { body=SharedSync::makeCommand("observe",syncHasSnapshot?syncSnapshot.revision:0); body["available"]=requestAvailable; body["platform"]="windows"; }
     try { syncFuture=std::async(std::launch::async,[config,body]{return SharedSync::request(config,body);}); }
@@ -110,16 +110,16 @@ void pumpSync(std::uint64_t now) {
                 SharedSync::sharedFields(settings,syncSnapshot.settings);
                 projectSync(now);
                 const bool stateChanged=!had || old.state!=timer.state;
-                if(stateChanged && (timer.state==BreakTimer::State::Waiting || timer.state==BreakTimer::State::Away)) {
+                const bool localChanged=!had || old.deviceState!=syncSnapshot.deviceState;
+                if(localChanged && (interactionState()==BreakTimer::State::Waiting || interactionState()==BreakTimer::State::Away)) {
                     inputBoundary=GetTickCount(); awayInputArmed=false; deviceInput.resetMotion();
                 }
                 health.sittingSent=syncSnapshot.sittingSent; health.workSent=syncSnapshot.workSent;
                 if(!sessionTiming.blocked()) {
-                    if(stateChanged && timer.state==BreakTimer::State::Resting) beginRest(true);
-                    const bool finished=had && ((old.state==BreakTimer::State::Resting && old.deadline<=syncSnapshot.serverNow && timer.state!=BreakTimer::State::Resting && timer.state!=BreakTimer::State::Away && timer.state!=BreakTimer::State::Paused) ||
-                        (old.state==BreakTimer::State::Working && timer.state==BreakTimer::State::Waiting));
+                    if(stateChanged && timer.state==BreakTimer::State::Resting && syncSnapshot.deviceState==BreakTimer::State::Resting) beginRest(true);
+                    const bool finished=had && syncSnapshot.restFinished>old.restFinished;
                     if(finished) restCompleted();
-                    if(had) {
+                    if(had && syncSnapshot.deviceActive) {
                         int events=0;
                         if(syncSnapshot.sittingSent && !old.sittingSent) events|=HealthReminders::Sitting;
                         if(syncSnapshot.workSent && !old.workSent) events|=HealthReminders::LongWork;
@@ -127,17 +127,17 @@ void pumpSync(std::uint64_t now) {
                         if(events) showHealthReminder(events,true);
                     }
                 }
-                if(stateChanged && timer.state==BreakTimer::State::Working) releaseReminderWindow();
-                syncStatus=result.status==409?L"本机状态已更新，请重试操作":L"已连接 · 本机独立计时，设置与统计同步";
+                if(localChanged && interactionState()==BreakTimer::State::Working) releaseReminderWindow();
+                syncStatus=result.status==409?L"状态已更新，请重试操作":L"已连接 · 共同倒计时，本机状态独立";
             } else syncStatus=result.error+L"；稍后自动重连";
-            syncNextPoll=result.ok && (pendingUnavailable || syncSnapshot.available!=!sessionTiming.blocked())?0:now+5000; updateSyncStatus(); refresh();
+            syncNextPoll=result.ok && (pendingUnavailable || syncSnapshot.available!=!sessionTiming.blocked())?0:now+(result.ok?1000:5000); updateSyncStatus(); refresh();
         }
     }
     if(!syncActive) return;
     projectSync(now);
     if(!syncBusy() && (now>=syncNextPoll || (syncHasSnapshot && syncOnline &&
         (timer.state==BreakTimer::State::Working || timer.state==BreakTimer::State::Resting) && timer.left(now)==0))) {
-        syncNextPoll=now+5000; launchSync();
+        syncNextPoll=now+1000; launchSync();
     }
 }
 std::wstring syncText(HWND d,int id) {

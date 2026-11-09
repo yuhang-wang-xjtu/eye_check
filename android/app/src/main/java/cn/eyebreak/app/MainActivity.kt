@@ -97,7 +97,8 @@ class MainActivity : Activity() {
         totals = label("", 16f); root.addView(totals)
         health = label("", 13f, muted); root.addView(health)
         primary = button("暂停计时") {
-            repo.command(when (repo.session.phase) { Phase.WORKING -> "pause"; Phase.RESTING -> "skip"; else -> "continue" })
+            val s=repo.session
+            repo.command(if(s.phase==Phase.RESTING) "skip" else if((if(s.coordinated) s.devicePhase else s.phase)==Phase.WORKING) "rest" else "continue")
         }; root.addView(primary)
         rest = button("立即休息") { repo.command("rest") }; root.addView(rest)
         root.addView(button("开始后台提醒") {
@@ -114,15 +115,15 @@ class MainActivity : Activity() {
     private fun render() {
         val s = repo.session
         restHelp.text = "远眺约 6 米 · 自动休息 ${s.options.restSeconds} 秒"
-        usageHelp.text = if (repo.sync.enabled) "手机独立计时：亮屏使用，熄屏休息，不控制电脑。同步统计对重叠使用时段去重。到点及休息结束只发送通知。" else
+        usageHelp.text = if (repo.sync.enabled) "状态独立、倒计时相同：任一设备使用就倒数，全部休息才按 5:1 回补。手机锁屏仍保留休息结束通知。" else
             "到点自动休息，休息期间不累计使用时长；开始和结束均通知。休息结束后亮屏自动继续，熄屏按 5:1 回补，不弹确认框。"
-        phase.text = Alerts.phaseText(s.phase)
+        phase.text = if(s.coordinated) (if(s.devicePhase==Phase.WORKING) "本机使用 · " else "本机休息 · ")+when(s.phase){Phase.WORKING->"共同倒计时";Phase.RESTING->"共同远眺休息";else->"全部休息，共同回补"} else Alerts.phaseText(s.phase)
         countdown.text = if (s.phase == Phase.WAITING) "00:00" else Alerts.clock(s.remainingAt(repo.now()))
         val today = Instant.ofEpochMilli(repo.now()).atZone(ZoneId.of(s.zone)).toLocalDate().toString()
         totals.text = "今日使用  ${Alerts.duration(s.usage[today] ?: 0)}"
         health.text = "久坐：${if (s.options.sittingEnabled) Alerts.clock((s.options.sittingMinutes * 60000L - s.sittingMs).coerceAtLeast(0)) else "已关闭"}   连续工作：${if (s.options.workEnabled) Alerts.clock((s.options.workMinutes * 60000L - s.workMs).coerceAtLeast(0)) else "已关闭"}"
-        primary.text = when (s.phase) { Phase.WORKING -> "暂停计时"; Phase.RESTING -> "跳过休息"; else -> "继续工作" }
-        rest.visibility = if (s.phase == Phase.AWAY) View.GONE else View.VISIBLE
+        primary.text = if(s.phase==Phase.RESTING) "跳过休息" else if((if(s.coordinated) s.devicePhase else s.phase)==Phase.WORKING) "立即休息" else "继续使用"
+        rest.visibility = if ((if(s.coordinated) s.devicePhase else s.phase) == Phase.AWAY) View.GONE else View.VISIBLE
         syncText.text = "${repo.syncStatus}${if (repo.busy) " · 连接中" else ""}"
         val exact = Build.VERSION.SDK_INT < 31 || getSystemService(AlarmManager::class.java).canScheduleExactAlarms()
         notice.text = listOfNotNull(if (!repo.running) "后台提醒未开启" else null,
@@ -196,7 +197,7 @@ class MainActivity : Activity() {
         val s = repo.session
         val popup = PopupMenu(this, anchor)
         if(s.options.sittingEnabled && s.sittingMs > 0) popup.menu.add(0,1,0,"我已起身活动（重置久坐）")
-        if(s.workMs > 0 || s.sittingMs > 0 || s.phase in listOf(Phase.WORKING,Phase.RESTING)) popup.menu.add(0,2,1,"结束本轮工作（清零并暂停）")
+        if(if(s.coordinated) s.devicePhase==Phase.WORKING else s.workMs > 0 || s.sittingMs > 0 || s.phase in listOf(Phase.WORKING,Phase.RESTING)) popup.menu.add(0,2,1,if(s.coordinated) "结束本机使用" else "结束本轮工作（清零并暂停）")
         if(popup.menu.size() == 0) { toast("当前没有需要重置的计时"); return }
         popup.setOnMenuItemClickListener { repo.command(if(it.itemId == 1) "stood_up" else "end_work"); true }; popup.show()
     }

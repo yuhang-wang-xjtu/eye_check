@@ -1,0 +1,3 @@
+#pragma once
+#define EYEBREAK_VERSION_TEXT "0.4.0"
+#define EYEBREAK_VERSION_NUMBERS 0,4,0,0

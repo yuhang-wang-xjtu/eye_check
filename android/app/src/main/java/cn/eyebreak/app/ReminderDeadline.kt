@@ -7,7 +7,7 @@ import java.time.ZoneId
 /** One alarm for the next actual reminder, never a periodic minute wake-up. */
 object ReminderDeadline {
     fun next(s: Session, now: Long): Long? {
-        if (s.phase == Phase.RESTING) return s.deadline
+        if (s.phase == Phase.RESTING) return if(s.coordinated && s.restEndAlertedCycle>=s.restCycle) null else s.deadline
         if (s.phase != Phase.WORKING) return null
         var next = s.deadline
         if (s.options.sittingEnabled && !s.sittingSent)
@@ -31,6 +31,9 @@ object ReminderDeadline {
                 next = minOf(next, at.toInstant().toEpochMilli())
             }
         }
+        // In shared mode an overdue cached state needs a server refresh, not
+        // repeated 100 ms wakeups while a request is in flight or offline.
+        if(s.coordinated && next<=now) return s.deadline.takeIf { it>now }
         return next.coerceAtLeast(now)
     }
 }

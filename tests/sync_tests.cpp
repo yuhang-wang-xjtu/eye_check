@@ -23,29 +23,31 @@ int wmain(int argc,wchar_t** argv) {
         }
         auto id=makeCommand("pause",0).at("operationId").get<std::string>(); c.room=L"validation_"+wide(id); c.device=L"windows-validation-device";
         check(valid(c),"private config valid");
-        auto first=request(c); check(first.ok && first.status==200 && first.snapshot.state==BreakTimer::State::Waiting,"new device waits for its own input");
+        auto first=request(c); check(first.ok && first.status==200 && first.snapshot.deviceState==BreakTimer::State::Waiting,"new device waits for its own input");
         auto observation=makeCommand("observe",first.snapshot.revision); observation["available"]=true; observation["platform"]="windows";
         first=request(c,observation); check(first.ok,"device availability");
         first=request(c,makeCommand("continue",first.snapshot.revision)); check(first.ok && first.snapshot.state==BreakTimer::State::Working,"device starts work");
         auto command=makeCommand("pause",first.snapshot.revision);
-        auto paused=request(c,command); check(paused.ok && paused.snapshot.state==BreakTimer::State::Paused,"HTTPS pause");
+        auto paused=request(c,command); check(paused.ok && paused.snapshot.deviceState==BreakTimer::State::Away,"HTTPS pause");
         auto repeated=request(c,command); check(repeated.ok && repeated.snapshot.revision==paused.snapshot.revision,"idempotent retry");
-        auto stale=request(c,makeCommand("continue",first.snapshot.revision)); check(stale.ok && stale.status==409 && stale.snapshot.state==BreakTimer::State::Paused,"stale command rejected");
+        auto stale=request(c,makeCommand("continue",first.snapshot.revision)); check(stale.ok && stale.status==409 && stale.snapshot.deviceState==BreakTimer::State::Away,"stale command rejected");
         auto settings=AppSettings{}; settings.restSeconds=33;
         auto updated=request(c,makeCommand("settings",stale.snapshot.revision,&settings)); check(updated.ok && updated.status==200 && updated.snapshot.settings.restSeconds==33,"shared settings");
         auto away=request(c,makeCommand("rest",updated.snapshot.revision)); check(away.ok && away.snapshot.state==BreakTimer::State::Away,"shared away");
         auto working=request(c,makeCommand("continue",away.snapshot.revision)); check(working.ok && working.snapshot.state==BreakTimer::State::Working,"shared continue");
-        auto stop=request(c,makeCommand("end_work",working.snapshot.revision)); check(stop.ok && stop.snapshot.sitting==0 && stop.snapshot.state==BreakTimer::State::Paused,"end work");
+        auto stop=request(c,makeCommand("end_work",working.snapshot.revision)); check(stop.ok && stop.snapshot.sitting==0 && stop.snapshot.deviceState==BreakTimer::State::Away,"end work");
         auto pcAway=request(c,makeCommand("rest",stop.snapshot.revision)); check(pcAway.ok,"PC enters away");
         auto phone=c; phone.device=L"android-validation-device";
         auto phoneObserve=makeCommand("observe",0); phoneObserve["available"]=true; phoneObserve["platform"]="android";
         auto phoneOn=request(phone,phoneObserve); check(phoneOn.ok,"phone screen on");
         auto phoneWork=request(phone,makeCommand("continue",phoneOn.snapshot.revision)); check(phoneWork.ok,"phone works independently");
-        auto pcStillAway=request(c); check(pcStillAway.ok && pcStillAway.snapshot.state==BreakTimer::State::Away,"phone cannot resume PC");
+        auto pcStillAway=request(c); check(pcStillAway.ok && pcStillAway.snapshot.deviceState==BreakTimer::State::Away && pcStillAway.snapshot.state==BreakTimer::State::Working,"phone cannot resume PC");
+        check(pcStillAway.snapshot.deadline==phoneWork.snapshot.deadline,"PC and phone share the exact same deadline");
         phoneObserve=makeCommand("observe",phoneWork.snapshot.revision); phoneObserve["available"]=false; phoneObserve["platform"]="android";
         auto phoneOff=request(phone,phoneObserve); check(phoneOff.ok && phoneOff.snapshot.state==BreakTimer::State::Away,"phone screen off stops phone");
-        auto pcBack=request(c,makeCommand("continue",pcStillAway.snapshot.revision)); check(pcBack.ok && pcBack.snapshot.state==BreakTimer::State::Working,"PC input resumes only PC");
-        auto phoneStillOff=request(phone); check(phoneStillOff.ok && phoneStillOff.snapshot.state==BreakTimer::State::Away,"PC cannot resume off phone");
+        auto pcContinue=makeCommand("continue",pcStillAway.snapshot.revision); pcContinue["expectedDeviceRevision"]=pcStillAway.snapshot.deviceRevision;
+        auto pcBack=request(c,pcContinue); check(pcBack.ok && pcBack.snapshot.state==BreakTimer::State::Working,"PC input resumes only PC");
+        auto phoneStillOff=request(phone); check(phoneStillOff.ok && phoneStillOff.snapshot.deviceState==BreakTimer::State::Away && phoneStillOff.snapshot.state==BreakTimer::State::Working,"PC cannot resume off phone");
         std::cout<<"HTTPS integration passed; temporary room "<<narrow(c.room)<<'\n'; return 0;
     }
     auto j=fixture(); const auto s=parse(j.dump());

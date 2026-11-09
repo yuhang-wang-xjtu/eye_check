@@ -154,6 +154,9 @@ class Store:
         self.db.execute("CREATE INDEX IF NOT EXISTS device_operation_age ON device_operations(room,device,created)")
         self.db.execute("CREATE TABLE IF NOT EXISTS shared_rooms (room TEXT PRIMARY KEY, settings TEXT NOT NULL, legacy TEXT NOT NULL)")
         self.db.execute("CREATE TABLE IF NOT EXISTS usage_intervals (room TEXT, day TEXT, intervals TEXT NOT NULL, PRIMARY KEY(room,day))")
+        self.db.execute("CREATE TABLE IF NOT EXISTS coordinated_sessions (room TEXT PRIMARY KEY, state TEXT NOT NULL)")
+        self.db.execute("CREATE TABLE IF NOT EXISTS coordinated_operations (room TEXT, device TEXT, id TEXT, fingerprint TEXT, created INTEGER NOT NULL, kind TEXT NOT NULL, PRIMARY KEY(room,device,id))")
+        self.db.execute("CREATE INDEX IF NOT EXISTS coordinated_operation_age ON coordinated_operations(room,device,created)")
         self.db.commit()
         self.lock = threading.Lock()
 
@@ -303,6 +306,150 @@ class Store:
             return status, dict(protocol=2, serverNowMs=now, snapshot=snapshot, events=events)
 
 
+    @staticmethod
+    def coordinate(s, now):
+        """Reconcile the shared clock without copying another device's mode."""
+        if s["state"] == "RESTING":
+            return
+        active = any(d["active"] and d["available"] and d["leaseUntilMs"] > now for d in s["devices"].values())
+        desired = "WORKING" if active else "AWAY"
+        if s["state"] != desired:
+            if desired == "AWAY":
+                s["remainingMs"] = max(0, s["deadlineMs"] - now) if s["state"] == "WORKING" else s["remainingMs"]
+            else:
+                s["deadlineMs"] = now + s["remainingMs"]
+            s["state"] = desired
+            s["revision"] += 1
+
+    def settle_coordinated(self, s, now):
+        events = []
+        if now < s["updatedAtMs"]:
+            delta = now - s["updatedAtMs"]
+            for d in s["devices"].values():
+                d["leaseUntilMs"] += delta
+            return settle(s, now)
+        # Stop exactly at expiries and timer boundaries; delayed polling must
+        # not count a vanished device until the end of the entire request gap.
+        while True:
+            cursor = s["updatedAtMs"]
+            boundaries = [now]
+            boundaries += [d["leaseUntilMs"] for d in s["devices"].values() if d["available"] and d["leaseUntilMs"] >= cursor]
+            if s["state"] in ("WORKING", "RESTING"):
+                boundaries.append(max(cursor, s["deadlineMs"]))
+            at = min(boundaries)
+            before = s["state"]
+            events += settle(s, at)
+            for d in s["devices"].values():
+                if d["available"] and d["leaseUntilMs"] <= at:
+                    d.update(available=False, active=False, mode="RESTING" if d["mode"] == "RESTING" else "AWAY", revision=d["revision"]+1)
+            if before == "WORKING" and s["state"] == "RESTING":
+                s["restCycle"] += 1
+                for d in s["devices"].values():
+                    if d["active"]:
+                        d.update(active=False, mode="RESTING", revision=d["revision"]+1)
+            if before == "RESTING" and s["state"] == "WAITING":
+                s["restFinished"] = s["restCycle"]
+                for d in s["devices"].values():
+                    if d["platform"] == "android" and d["available"]:
+                        d.update(active=True, mode="WORKING", revision=d["revision"]+1)
+                    elif d["mode"] == "RESTING":
+                        d.update(active=False, mode="WAITING" if d["available"] else "AWAY", revision=d["revision"]+1)
+            self.coordinate(s, at)
+            if at >= now:
+                break
+        return list(dict.fromkeys(events))
+
+    def coordinated_request(self, room, device, command=None):
+        if not re.fullmatch(r"[a-zA-Z0-9_-]{8,80}", room) or not re.fullmatch(r"[a-zA-Z0-9_-]{8,80}", device):
+            raise ValueError("invalid identity")
+        with self.lock, self.db:
+            now = self.clock()
+            row = self.db.execute("SELECT state FROM coordinated_sessions WHERE room=?", (room,)).fetchone()
+            if row:
+                s = json.loads(row[0])
+            else:
+                s = new_session(now, self.zone)
+                s.update(state="AWAY", devices={}, restCycle=0, restFinished=0)
+                # Freeze existing history once. Old V1/V2 activity never drives V3.
+                legacy = self.db.execute("SELECT settings,legacy FROM shared_rooms WHERE room=?", (room,)).fetchone()
+                if legacy:
+                    s["settings"], s["usage"] = json.loads(legacy[0]), json.loads(legacy[1])
+                    for day, intervals in self.db.execute("SELECT day,intervals FROM usage_intervals WHERE room=?", (room,)):
+                        s["usage"][day] = min(86400000, s["usage"].get(day, 0)+sum(b-a for a,b in json.loads(intervals)))
+                else:
+                    old = self.db.execute("SELECT state FROM sessions WHERE id=?", (room,)).fetchone()
+                    if old:
+                        old = json.loads(old[0]); s["settings"], s["usage"] = old["settings"], old["usage"]
+            events = self.settle_coordinated(s, now)
+            if device not in s["devices"]:
+                if len(s["devices"]) >= 32:
+                    raise ValueError("too many devices")
+                s["devices"][device] = dict(available=False, active=False, mode="WAITING", leaseUntilMs=now, platform="windows", revision=0)
+            d = s["devices"][device]
+            status = 200
+            if command is not None:
+                if not isinstance(command, dict) or type(command.get("expectedRevision")) is not int:
+                    raise ValueError("expectedRevision required")
+                operation = command.get("operationId", "")
+                if not isinstance(operation, str) or not re.fullmatch(r"[a-zA-Z0-9_-]{8,100}", operation):
+                    raise ValueError("invalid operation")
+                fingerprint = json.dumps(command, sort_keys=True, separators=(",", ":"))
+                prior = self.db.execute("SELECT fingerprint FROM coordinated_operations WHERE room=? AND device=? AND id=?", (room,device,operation)).fetchone()
+                action = command.get("action")
+                local_action = action in ("continue", "rest", "pause", "end_work")
+                expected = command.get("expectedDeviceRevision", command["expectedRevision"]) if local_action else command["expectedRevision"]
+                current = d["revision"] if local_action and "expectedDeviceRevision" in command else s["revision"]
+                if prior:
+                    if prior[0] != fingerprint:
+                        raise ValueError("operation reused")
+                elif action != "observe" and (type(expected) is not int or expected != current):
+                    status = 409
+                elif action == "continue" and s["state"] == "RESTING":
+                    status = 409  # stale input cannot skip a timed automatic rest
+                else:
+                    if action == "observe":
+                        available, platform, resume = command.get("available"), command.get("platform"), command.get("resume",False)
+                        if type(available) is not bool or type(resume) is not bool or platform not in ("windows","android"):
+                            raise ValueError("invalid observation")
+                        was_available = d["available"]
+                        d["platform"], d["available"] = platform, available
+                        d["leaseUntilMs"] = now+LEASE_MS if available else now
+                        if not available:
+                            mode = "RESTING" if s["state"] == "RESTING" and d["mode"] == "RESTING" else "AWAY"
+                            if d["active"] or d["mode"] != mode:
+                                d.update(active=False,mode=mode,revision=d["revision"]+1)
+                        elif platform == "android" and (resume or not was_available) and s["state"] != "RESTING":
+                            d.update(active=True,mode="WORKING",revision=d["revision"]+1)
+                    elif action == "continue":
+                        if not d["available"]:
+                            raise ValueError("inactive device cannot work")
+                        d.update(active=True,mode="WORKING",revision=d["revision"]+1)
+                    elif action in ("rest","pause","end_work"):
+                        d.update(active=False,mode="AWAY",revision=d["revision"]+1)
+                        if action == "end_work" and not any(x["active"] for x in s["devices"].values()):
+                            s.update(sittingMs=0,workMs=0,sittingSent=False,workSent=False)
+                    elif action == "settings":
+                        validate_options(command.get("settings")); s["settings"] = command["settings"].copy(); s["revision"] += 1
+                    elif action == "stood_up":
+                        s.update(sittingMs=0,sittingSent=False,revision=s["revision"]+1)
+                    elif action == "skip" and s["state"] == "RESTING" and d["available"]:
+                        s.update(state="AWAY",remainingMs=WORK_MS,revision=s["revision"]+1)
+                        for x in s["devices"].values():
+                            if x["mode"] == "RESTING":
+                                x.update(mode="WAITING",active=False,revision=x["revision"]+1)
+                        d.update(mode="WORKING",active=True,revision=d["revision"]+1)
+                    else:
+                        raise ValueError("invalid action")
+                    self.coordinate(s, now)
+                    self.db.execute("INSERT INTO coordinated_operations VALUES (?,?,?,?,?,?)", (room,device,operation,fingerprint,now,action))
+            self.db.execute("DELETE FROM coordinated_operations WHERE room=? AND device=? AND (created<? OR (kind='observe' AND created<?))", (room,device,now-86400000,now-300000))
+            self.db.execute("INSERT OR REPLACE INTO coordinated_sessions VALUES (?,?)", (room,json.dumps(s)))
+            snapshot = {k:copy.deepcopy(v) for k,v in s.items() if k != "devices"}
+            snapshot.update(available=d["available"],deviceActive=d["active"],deviceState=d["mode"],deviceRevision=d["revision"],
+                            otherActive=any(x["active"] for k,x in s["devices"].items() if k!=device),activeDevices=sum(x["active"] for x in s["devices"].values()))
+            return status,dict(protocol=3,serverNowMs=now,snapshot=snapshot,events=events)
+
+
 def handler(store, token):
     class Handler(BaseHTTPRequestHandler):
         server_version = "EyeBreakSync/0.1"
@@ -329,7 +476,9 @@ def handler(store, token):
             matched = re.fullmatch(pattern, self.path)
             device_pattern = r"/v2/sessions/([a-zA-Z0-9_-]{8,80})/devices/([a-zA-Z0-9_-]{8,80})" + (r"/commands" if post else "")
             device_match = re.fullmatch(device_pattern, self.path)
-            if not matched and not device_match:
+            coordinated_pattern = device_pattern.replace("/v2/", "/v3/")
+            coordinated_match = re.fullmatch(coordinated_pattern, self.path)
+            if not matched and not device_match and not coordinated_match:
                 self.reply(404, {"error": "not found"}); return
             try:
                 command = None
@@ -338,7 +487,10 @@ def handler(store, token):
                     if not 0 < size <= 65536:
                         raise ValueError("request body must be 1–65536 bytes")
                     command = json.loads(self.rfile.read(size))
-                code, body = store.device_request(device_match[1], device_match[2], command) if device_match else store.request(matched[1], command)
+                if coordinated_match:
+                    code, body = store.coordinated_request(coordinated_match[1],coordinated_match[2],command)
+                else:
+                    code, body = store.device_request(device_match[1], device_match[2], command) if device_match else store.request(matched[1], command)
                 self.reply(code, body)
             except (ValueError, KeyError, TypeError, OverflowError):
                 self.reply(400, {"error": "invalid request or action not available"})

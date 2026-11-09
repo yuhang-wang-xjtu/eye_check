@@ -67,6 +67,9 @@ inline std::uint64_t dateDay(const std::string& date) {
 struct Snapshot {
     Json raw; std::uint64_t serverNow=0,revision=0,deadline=0,remaining=0,sitting=0,work=0;
     BreakTimer::State state=BreakTimer::State::Working;
+    BreakTimer::State deviceState=BreakTimer::State::Waiting;
+    std::uint64_t deviceRevision=0,restCycle=0,restFinished=0;
+    bool deviceActive=false,otherActive=false;
     AppSettings settings; DailyUsage usage; bool sittingSent=false,workSent=false,available=false; std::string night,zone;
 };
 inline Snapshot parse(const std::string& body) {
@@ -93,6 +96,18 @@ inline Snapshot parse(const std::string& body) {
     r.settings.sittingEnabled=flag(o,"sittingEnabled"); r.settings.workEnabled=flag(o,"workEnabled"); r.settings.nightEnabled=flag(o,"nightEnabled");
     r.sittingSent=flag(s,"sittingSent"); r.workSent=flag(s,"workSent"); r.night=s.at("lastNight").get<std::string>();
     if(s.contains("available")) r.available=flag(s,"available");
+    r.deviceState=r.state;
+    if(s.contains("deviceState")) {
+        const auto mode=s.at("deviceState").get<std::string>();
+        if(mode=="WORKING") r.deviceState=BreakTimer::State::Working;
+        else if(mode=="AWAY") r.deviceState=BreakTimer::State::Away;
+        else if(mode=="WAITING") r.deviceState=BreakTimer::State::Waiting;
+        else if(mode=="RESTING") r.deviceState=BreakTimer::State::Resting;
+        else throw std::runtime_error("device state");
+        r.deviceRevision=integer(s,"deviceRevision",9007199254740991ULL);
+        r.restCycle=integer(s,"restCycle",9007199254740991ULL); r.restFinished=integer(s,"restFinished",r.restCycle);
+        r.deviceActive=flag(s,"deviceActive"); r.otherActive=flag(s,"otherActive");
+    }
     if(!r.night.empty()) dateDay(r.night);
     r.zone=s.at("zone").get<std::string>();
     // The deployed shared session and its calendar are explicitly China time.
@@ -117,7 +132,7 @@ inline Result request(const Config& c,const Json& command=Json()) {
         std::wstring host(u.lpszHostName,u.dwHostNameLength),path(u.lpszUrlPath,u.dwUrlPathLength);
         while(!path.empty() && path.back()==L'/') path.pop_back();
         if(c.device.empty() || c.device.size()>80 || c.device.find_first_not_of(L"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_")!=std::wstring::npos) throw std::runtime_error("device");
-        path+=L"/v2/sessions/"+c.room+L"/devices/"+c.device; if(!command.is_null()) path+=L"/commands";
+        path+=L"/v3/sessions/"+c.room+L"/devices/"+c.device; if(!command.is_null()) path+=L"/commands";
         Handle session(WinHttpOpen(L"EyeBreak/0.3",WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,WINHTTP_NO_PROXY_NAME,WINHTTP_NO_PROXY_BYPASS,0));
         WinHttpSetTimeouts(session,1500,1500,2000,2500);
         Handle connection(WinHttpConnect(session,host.c_str(),u.nPort,0));
@@ -136,7 +151,8 @@ inline Result request(const Config& c,const Json& command=Json()) {
             if(!WinHttpReadData(req,buffer,sizeof(buffer),&read) || response.size()+read>1024*1024 || GetTickCount64()-start>10000) throw std::runtime_error("response");
             response.append(buffer,read);
         } while(read);
-        if(Json::parse(response).value("protocol",0)!=2) throw std::runtime_error("protocol");
+        auto envelope=Json::parse(response);
+        if(envelope.value("protocol",0)!=3 || !envelope.at("snapshot").contains("deviceState")) throw std::runtime_error("protocol");
         r.snapshot=parse(response); r.received=GetTickCount64(); r.ok=true;
     } catch(...) { r.error=L"连接失败或服务器数据无效；已保留本地记录"; }
     return r;

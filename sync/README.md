@@ -1,6 +1,6 @@
 # 共享会话 API 原型
 
-为 Windows 和 Android 提供设备独立的倒计时、共同的提醒设置和汇总使用统计。v1 仅为旧客户端兼容，新版两端使用 v2。
+为 Windows 和 Android 提供设备独立的使用状态与共同倒计时。V1/V2 仅保留旧客户端兼容，v0.4.0 起两端使用 V3。
 
 ## 本地运行
 
@@ -23,7 +23,7 @@ python3 server.py --init-token --token-file /path/to/private/token
 python3 server.py --database /path/to/private/session.sqlite --token-file /path/to/private/token --timezone Asia/Shanghai
 ```
 
-现有 HTTPS 反向代理需同时转发 `/v1/` 和 `/v2/` 到本地 API 对应路径（或整个 `/eyebreak/` 前缀），保留 `Authorization`，禁用 API 缓存，请求体限制 64 KiB，设置连接/读取超时。访问入口需要有效 TLS 证书；客户端不忽略证书错误。不要直接公开原型 Python HTTP 端口。
+现有 HTTPS 反向代理需同时转发 `/v1/`、`/v2/` 和 `/v3/` 到本地 API 对应路径（或整个 `/eyebreak/` 前缀），保留 `Authorization`，禁用 API 缓存，请求体限制 64 KiB，设置连接/读取超时。访问入口需要有效 TLS 证书；客户端不忽略证书错误。不要直接公开原型 Python HTTP 端口。
 
 这是单用户、单进程参考服务；公网正式使用还需要部署层速率限制、进程管理、数据库备份。客户端不预置服务地址或访问令牌。
 
@@ -39,7 +39,19 @@ Nginx 在已有 HTTPS 站点中代理 `/eyebreak/`，两端填写的服务器根
 
 `GET /health` 不需要令牌，保留旧版 `{"status":"ok","protocol":1}` 响应兼容，不表示仅支持 v1。公网对应 `/eyebreak/health`；会话和统计接口仍必须携带令牌。离线区间回填和旧本地历史导入尚未实现。
 
-## 协议 v2：设备独立
+## 协议 V3：状态独立、计时共同
+
+`GET /v3/sessions/{sessionId}/devices/{deviceId}` 读取共同计时和本机状态，POST 同一路径加 `/commands`。响应 `protocol:3`。`snapshot.state/deadlineMs/remainingMs/sittingMs/workMs/settings/usage` 是会话共同数据；`deviceState/deviceActive/available/deviceRevision` 只描述请求设备，`otherActive/activeDevices` 描述是否还有其他设备使用。设备 ID 沿用安装 UUID，无需用户更换房间或令牌。
+
+聚合规则为逻辑 OR：任一在线设备 active 时共同 WORKING；全部 inactive 时共同 AWAY，三项按 5:1 回补并封顶。每段共同工作只统计一次。转换前先结算到服务器当前时刻，按设备租约、倒计时和休息截止点依次分段，避免迟到轮询误计。约每秒 heartbeat；30 秒租约到期撤销该设备 active，其他设备仍 active 时不回补。
+
+`observe` 携带 available、platform；安卓可携带 resume=true 表示本次亮屏恢复。Windows available=true 只表示可用，不表示新输入；本机新输入另发 continue。rest/pause/end_work 撤销本机 active，不能让其他设备休息或把其状态改为工作。客户端保留未确认的离开事件，先补发 off 再恢复 on。操作附 expectedDeviceRevision 保护本机输入状态，其他设备操作不制造本机 CAS 冲突；设置、跳过自动休息和重置久坐等共同操作仍比较 expectedRevision。未知/过期版本返回 409 最新快照，客户端不重放旧输入。
+
+自动倒计时到点仍全局 RESTING（默认 25 秒），暂停使用累计，清除原使用标记；结束后亮屏且租约有效的安卓恢复本机 active，Windows 等本机新输入。自动休息是原先约定的固定时长例外，不因亮屏而跳过。restCycle 在休息开始时增加，restFinished 在完成时记录对应序号，永久随快照提供；一个客户端查询不会消耗另一个客户端的结束提醒。锁屏手机用已收到的截止时间本地闹钟提醒，再以完成序号补发、去重。
+
+首次 V3 建立时冻结 V1/V2 已有统计和提醒设置为初始历史；新共同周期从 20 分钟开始，旧独立倒计时不强行合并。旧接口继续使用各自旧表，不能控制新版状态。新表 coordinated_sessions / coordinated_operations 与旧数据同时进入 SQLite 在线备份。用户操作去重保存 24 小时，周期 observe 去重保存 5 分钟，限制每秒心跳带来的存储增长。
+
+## 协议 v2：旧版 v0.3.0 兼容
 
 `GET /v2/sessions/{sessionId}/devices/{deviceId}` 读取本设备；`POST` 同一路径加 `/commands` 执行本设备命令。设备 ID 为持久的安装 UUID，不使用硬件标识，也不让用户手填。首次设备为 `WAITING`，不会继承其他设备正在工作的状态。原有 v1 命令、CAS 和 UUID 去重规则保留；版本号按设备隔离，修改共享设置会刷新各设备版本号。
 

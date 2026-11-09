@@ -174,4 +174,77 @@ class DeviceTests(unittest.TestCase):
         self.work(self.phone)
         self.assertEqual(self.get(self.pc)["state"], "WAITING")
 
+class CoordinatedTests(unittest.TestCase):
+    def setUp(self):
+        self.now=1800000000000; self.store=server.Store(":memory:",clock=lambda:self.now)
+        self.room,self.pc,self.phone="coordinated-room","coordinated-pc","coordinated-phone"; self.seq=0
+    def tearDown(self): self.store.db.close()
+    def get(self,device): return self.store.coordinated_request(self.room,device)[1]["snapshot"]
+    def cmd(self,device,action,**extra):
+        self.seq+=1; s=self.get(device)
+        cmd=dict(action=action,expectedRevision=s["revision"],expectedDeviceRevision=s["deviceRevision"],operationId=f"coordinated-{self.seq:08}",**extra)
+        return self.store.coordinated_request(self.room,device,cmd)[1]["snapshot"]
+    def observe(self,device,on,resume=False):
+        return self.cmd(device,"observe",available=on,platform="android" if device==self.phone else "windows",resume=resume)
+    def work(self,device):
+        self.observe(device,True)
+        return self.cmd(device,"continue")
+    def left(self,s): return max(0,s["deadlineMs"]-self.now) if s["state"] in ("WORKING","RESTING") else s["remainingMs"]
+    def test_phone_works_pc_stays_away_but_clocks_equal(self):
+        self.work(self.pc); self.now+=10000; self.cmd(self.pc,"rest")
+        self.observe(self.phone,True)
+        self.now+=3000
+        pc,phone=self.get(self.pc),self.get(self.phone)
+        self.assertFalse(pc["deviceActive"]); self.assertEqual(pc["deviceState"],"AWAY")
+        self.assertTrue(phone["deviceActive"]); self.assertEqual(pc["state"],"WORKING")
+        self.assertEqual(self.left(pc),1187000); self.assertEqual(self.left(pc),self.left(phone))
+        self.assertEqual(pc["sittingMs"],13000)
+        self.observe(self.phone,False); self.now+=1000
+        pc,phone=self.get(self.pc),self.get(self.phone)
+        self.assertEqual(pc["state"],"AWAY"); self.assertEqual(self.left(pc),1192000)
+        self.assertEqual(self.left(pc),self.left(phone)); self.assertEqual(pc["workMs"],8000)
+        self.assertEqual(sum(pc["usage"].values()),13000)
+    def test_rest_on_one_device_does_not_recover_while_other_active(self):
+        self.work(self.pc); self.observe(self.phone,True); self.now+=5000
+        self.cmd(self.pc,"rest"); self.now+=4000
+        s=self.get(self.pc); self.assertEqual(self.left(s),1191000); self.assertEqual(s["workMs"],9000)
+        self.assertEqual(sum(s["usage"].values()),9000)
+        self.assertEqual(self.left(s),self.left(self.get(self.phone)))
+    def test_phone_off_does_not_stop_active_pc(self):
+        self.work(self.pc); self.observe(self.phone,True); self.observe(self.phone,False); self.now+=5000
+        p=self.get(self.phone); self.assertEqual(p["deviceState"],"AWAY"); self.assertEqual(p["state"],"WORKING")
+        self.assertEqual(self.left(p),1195000)
+    def test_unlock_does_not_activate_pc(self):
+        self.work(self.pc); self.observe(self.pc,False); self.observe(self.pc,True)
+        self.assertFalse(self.get(self.pc)["deviceActive"])
+        self.assertEqual(self.get(self.pc)["state"],"AWAY")
+    def test_expiry_uses_or_of_live_devices(self):
+        self.work(self.pc); self.observe(self.phone,True); self.now+=20000; self.observe(self.pc,True)
+        self.now+=15000; s=self.get(self.pc)
+        self.assertTrue(s["deviceActive"]); self.assertEqual(s["activeDevices"],1)
+        self.assertEqual(self.left(s),1165000)
+        self.now+=20000; s=self.get(self.pc)
+        self.assertEqual(s["state"],"AWAY"); self.assertEqual(self.left(s),1175000)
+        self.assertEqual(sum(s["usage"].values()),50000)
+    def test_rest_end_when_phone_locked_is_durable(self):
+        self.work(self.pc); self.observe(self.phone,True)
+        row=self.store.db.execute("SELECT state FROM coordinated_sessions WHERE room=?",(self.room,)).fetchone()
+        s=json.loads(row[0]); s["deadlineMs"]=self.now+1000; s["settings"]["restSeconds"]=2
+        with self.store.db: self.store.db.execute("UPDATE coordinated_sessions SET state=? WHERE room=?",(json.dumps(s),self.room))
+        self.now+=1000; self.assertEqual(self.get(self.phone)["state"],"RESTING")
+        self.observe(self.phone,False); self.now+=2000
+        self.get(self.pc) # A PC poll consumes transient events, but cannot consume the phone's notice marker.
+        phone=self.get(self.phone)
+        self.assertEqual(phone["restFinished"],1); self.assertFalse(phone["deviceActive"])
+        self.assertEqual(phone["state"],"AWAY"); self.assertEqual(sum(phone["usage"].values()),1000)
+        self.observe(self.phone,True)
+        self.assertEqual(self.get(self.pc)["state"],"WORKING")
+        self.assertFalse(self.get(self.pc)["deviceActive"])
+    def test_two_devices_share_one_revision_clock_but_local_commands_commute(self):
+        self.work(self.pc); pc=self.get(self.pc); self.observe(self.phone,True)
+        self.seq+=1
+        status,body=self.store.coordinated_request(self.room,self.pc,dict(action="rest",expectedRevision=pc["revision"],expectedDeviceRevision=pc["deviceRevision"],operationId=f"coordinated-{self.seq:08}"))
+        self.assertEqual(status,200); self.assertEqual(body["snapshot"]["state"],"WORKING")
+        self.assertFalse(body["snapshot"]["deviceActive"])
+
 if __name__=="__main__": unittest.main()

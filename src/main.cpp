@@ -15,13 +15,14 @@
 #include "usage_store.h"
 #include "diagnostics.h"
 #include "sync_client.h"
+#include "update_checker.h"
 
 namespace {
 constexpr UINT TrayMessage = WM_APP + 1;
-constexpr int Toggle = 101, Rest = 102, Hide = 103, Quit = 104, Open = 105, Settings = 106, StoodUp = 107, EndWork = 108, Away = 109, Usage = 110, Sync = 111;
+constexpr int Toggle = 101, Rest = 102, Hide = 103, Quit = 104, Open = 105, Settings = 106, StoodUp = 107, EndWork = 108, Away = 109, Usage = 110, Sync = 111, Update = 112;
 const wchar_t* ClassName = L"EyeBreak202020Window";
 HWND window = nullptr, toggleButton = nullptr, restButton = nullptr, hideButton = nullptr, settingsButton = nullptr;
-HWND usageButton = nullptr, syncButton = nullptr;
+HWND usageButton = nullptr, syncButton = nullptr, updateButton = nullptr;
 HWND healthWindow = nullptr, settingsWindow = nullptr, usageWindow = nullptr;
 DailyUsage dailyUsage;
 std::wstring usageFile;
@@ -59,6 +60,7 @@ std::uint64_t visibleDay();
 bool syncCanCommand();
 bool sendSync(const std::string& action,const AppSettings* draft);
 bool sharedMode();
+BreakTimer::State interactionState();
 bool saveReminderSettings(const AppSettings& draft);
 std::wstring usageDuration(std::uint64_t milliseconds) {
     const auto seconds=milliseconds/1000;
@@ -114,12 +116,12 @@ void updateMainFonts(UINT dpi) {
     bodyFont=Dpi::font(Typography::Body,FW_NORMAL,Typography::Face,dpi);
     captionFont=Dpi::font(Typography::Caption,FW_NORMAL,Typography::Face,dpi);
     clockFont=Dpi::font(Typography::Clock,FW_LIGHT,L"Segoe UI",dpi);
-    for(HWND button : {toggleButton,restButton,hideButton,settingsButton,usageButton,syncButton})
+    for(HWND button : {toggleButton,restButton,hideButton,settingsButton,usageButton,syncButton,updateButton})
         if(button) SendMessageW(button,WM_SETFONT,reinterpret_cast<WPARAM>(bodyFont),TRUE);
     if(oldTitle) DeleteObject(oldTitle); if(oldBody) DeleteObject(oldBody); if(oldClock) DeleteObject(oldClock);
     if(oldCaption) DeleteObject(oldCaption);
 }
-bool isWorking() { return !sessionTiming.blocked() && timer.state == BreakTimer::State::Working; }
+bool isWorking() { return !sessionTiming.blocked() && interactionState() == BreakTimer::State::Working; }
 const wchar_t* toggleLabel() { return timer.state==BreakTimer::State::Resting ? L"跳过休息" : isWorking() ? L"暂停计时" : L"继续工作"; }
 std::wstring restLabel() { return L"立即休息"; }
 void playReminderSound(const std::wstring& path, bool enabled) {
@@ -290,14 +292,15 @@ void refresh() {
     SetWindowTextW(toggleButton, toggleLabel());
     EnableWindow(toggleButton, !sessionTiming.blocked() && (!sharedMode() || syncCanCommand()));
     SetWindowTextW(restButton, restLabel().c_str());
-    ShowWindow(restButton,timer.state==BreakTimer::State::Away?SW_HIDE:SW_SHOW);
+    ShowWindow(restButton,(sharedMode()?!isWorking():interactionState()==BreakTimer::State::Away)?SW_HIDE:SW_SHOW);
     EnableWindow(restButton, !sessionTiming.blocked() && (!sharedMode() || syncCanCommand()));
     InvalidateRect(window, nullptr, FALSE);
     if (desktopIcon) InvalidateRect(desktopIcon, nullptr, FALSE);
     if (trayPresent) {
         NOTIFYICONDATAW n{}; n.cbSize = sizeof(n); n.hWnd = window; n.uID = 1; n.uFlags = NIF_TIP;
         std::wstring tip = L"20·20·20 — ";
-        tip += timer.state == BreakTimer::State::Away ? L"休息回补中 " + clockText() :
+        if(sharedMode()) tip+=(isWorking()?L"本机使用 · ":L"本机休息 · ")+std::wstring(timer.state==BreakTimer::State::Away?L"共同回补 ":L"共同倒计时 ")+clockText();
+        else tip += timer.state == BreakTimer::State::Away ? L"休息回补中 " + clockText() :
             timer.state == BreakTimer::State::Waiting ? L"休息完成，等待继续工作" :
             timer.state == BreakTimer::State::Paused ? L"已暂停" :
             (timer.state == BreakTimer::State::Resting ? L"休息中 " : L"距离休息 ") + clockText();
@@ -321,7 +324,8 @@ void onInputResumed(std::uint64_t now) {
     hideAfterRest = false; refresh();
 }
 bool resumeFromInput(const char* source,DWORD eventTime) {
-    const auto state=timer.state;
+    const auto state=interactionState();
+    if(sharedMode() && timer.state==BreakTimer::State::Resting) return false;
     if(sessionTiming.blocked() || (state!=BreakTimer::State::Waiting && state!=BreakTimer::State::Away)) return false;
     const DWORD age=eventTime-inputBoundary;
     if((state==BreakTimer::State::Away && !awayInputArmed) || !age || age>=0x80000000U) return false;
@@ -342,7 +346,7 @@ void restCompleted() {
     if (trayPresent) {
         NOTIFYICONDATAW n{}; n.cbSize = sizeof(n); n.hWnd = window; n.uID = 1; n.uFlags = NIF_INFO;
         wcscpy_s(n.szInfoTitle, L"休息完成");
-        wcscpy_s(n.szInfo, timer.state==BreakTimer::State::Working ? L"本机休息已结束，已继续计时。" : L"点击继续工作，或操作本机鼠标、键盘、手柄后开始下一轮计时。");
+        wcscpy_s(n.szInfo, isWorking() ? L"休息已结束，本机正在使用。" : L"休息完成。本机仍在休息；点击继续或操作本机鼠标、键盘、手柄后恢复本机使用。");
         n.dwInfoFlags = NIIF_INFO | NIIF_NOSOUND; Shell_NotifyIconW(NIM_MODIFY, &n);
     }
     bringReminderForward(window);
@@ -364,6 +368,7 @@ void beginRest(bool notify) {
     if (GetForegroundWindow() == window) SetFocus(restButton);
 }
 #include "sync_runtime.inl"
+#include "update_runtime.inl"
 bool sharedMode() { return syncActive; }
 bool saveReminderSettings(const AppSettings& draft) {
     if(!syncActive) {
@@ -381,13 +386,14 @@ bool saveReminderSettings(const AppSettings& draft) {
 void command(int id) {
     auto now = GetTickCount64();
     if(id==Sync) { showSync(); return; }
+    if(id==Update) { showUpdates(); return; }
     if (sessionTiming.blocked() && id != Quit) return;
     sessionTiming.advance(now);
     if(syncActive) {
         std::string action;
-        if(id==Toggle) action=timer.state==BreakTimer::State::Working?"pause":timer.state==BreakTimer::State::Resting?"skip":"continue";
-        else if(id==Rest) { if(timer.state==BreakTimer::State::Away) return; action="rest"; }
-        else if(id==Away) action=timer.state==BreakTimer::State::Away?"continue":"rest";
+        if(id==Toggle) action=timer.state==BreakTimer::State::Resting?"skip":isWorking()?"pause":"continue";
+        else if(id==Rest) { if(interactionState()==BreakTimer::State::Away) return; action="rest"; }
+        else if(id==Away) action=isWorking()?"rest":"continue";
         else if(id==StoodUp) action="stood_up";
         else if(id==EndWork) action="end_work";
         if(!action.empty()) { sendSync(action); refresh(); return; }
@@ -436,15 +442,16 @@ HMENU buildTrayMenu() {
     if(!sessionTiming.blocked() && (!syncActive || syncCanCommand())) {
         using State=BreakTimer::State;
         AppendMenuW(menu,MF_STRING,Toggle,toggleLabel());
-        if(timer.state!=State::Away) AppendMenuW(menu,MF_STRING,Rest,L"立即休息    Ctrl+Alt+L");
+        if(syncActive?isWorking():interactionState()!=State::Away) AppendMenuW(menu,MF_STRING,Rest,L"立即休息    Ctrl+Alt+L");
         if(settings.sittingEnabled && health.sittingMs>0)
             AppendMenuW(menu,MF_STRING,StoodUp,L"我已起身活动（重置久坐）");
-        if(health.workMs>0 || health.sittingMs>0 || timer.state==State::Working || timer.state==State::Resting)
-            AppendMenuW(menu,MF_STRING,EndWork,L"结束本轮工作（清零并暂停）");
+        if(syncActive?isWorking():(health.workMs>0 || health.sittingMs>0 || timer.state==State::Working || timer.state==State::Resting))
+            AppendMenuW(menu,MF_STRING,EndWork,syncActive?L"结束本机使用":L"结束本轮工作（清零并暂停）");
     }
     AppendMenuW(menu, MF_STRING, Usage, L"每日使用统计…");
     AppendMenuW(menu, MF_STRING, Settings, L"提醒设置…");
     AppendMenuW(menu, MF_STRING, Sync, L"服务器同步…");
+    AppendMenuW(menu, MF_STRING, Update, L"检查更新…");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, Quit, L"退出");
     return menu;
@@ -560,6 +567,7 @@ void layout(int width, int height) {
     MoveWindow(settingsButton, width - px(118), px(24), px(90), px(36), TRUE);
     MoveWindow(usageButton, width - px(218), px(24), px(90), px(36), TRUE);
     MoveWindow(syncButton, width - px(310), px(24), px(82), px(36), TRUE);
+    MoveWindow(updateButton, width - px(410), px(24), px(90), px(36), TRUE);
 }
 LRESULT CALLBACK proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     if (message == taskbarCreated && taskbarCreated != 0) {
@@ -581,6 +589,7 @@ LRESULT CALLBACK proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
         settingsButton = button(Settings, L"设置");
         usageButton = button(Usage,L"统计");
         syncButton = button(Sync,L"同步");
+        updateButton = button(Update,L"更新");
         RECT client{}; GetClientRect(hwnd, &client); layout(client.right, client.bottom);
         awayHotkeyAvailable = RegisterHotKey(hwnd, 1, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'L') != FALSE;
         deviceInput.attach(hwnd);
@@ -626,8 +635,9 @@ LRESULT CALLBACK proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
         LASTINPUTINFO input{sizeof(LASTINPUTINFO), 0};
         const bool validInput = GetLastInputInfo(&input) != FALSE;
         const bool controllerChanged = deviceInput.pollControllers();
+        const auto inputState=interactionState();
         const bool wasAwayArmed = awayInputArmed;
-        if (oldState == BreakTimer::State::Away && !awayInputArmed) {
+        if (inputState == BreakTimer::State::Away && !awayInputArmed) {
             // Ignore release events belonging to the click/hotkey that entered away mode.
             const bool held = (GetAsyncKeyState(VK_CONTROL) & 0x8000) || (GetAsyncKeyState(VK_MENU) & 0x8000) ||
                 (GetAsyncKeyState('L') & 0x8000) || (GetAsyncKeyState(VK_LBUTTON) & 0x8000) || (GetAsyncKeyState(VK_RBUTTON) & 0x8000);
@@ -635,7 +645,7 @@ LRESULT CALLBACK proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
         }
         // GetLastInputInfo includes injected/system input and is not proof of activity.
         const bool eyeStarted = !syncActive && timer.tick(now);
-        if ((oldState == BreakTimer::State::Waiting || (oldState == BreakTimer::State::Away && wasAwayArmed)) && controllerChanged)
+        if ((inputState == BreakTimer::State::Waiting || (inputState == BreakTimer::State::Away && wasAwayArmed)) && controllerChanged)
             resumeFromInput("xinput",static_cast<DWORD>(now));
         if(syncActive) { if(previousSecond!=now/1000) { refresh(); previousSecond=now/1000; } return 0; }
         if (eyeStarted) beginRest(true);
@@ -696,7 +706,9 @@ LRESULT CALLBACK proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
         drawText(memory, titleFont, foreground, L"20 · 20 · 20", row(24,66));
         std::wstring subtitle = L"每 20 分钟，远眺约 6 米，休息 " + std::to_wstring(settings.restSeconds) + L" 秒";
         drawText(memory, captionFont, Theme::Muted, subtitle, row(73,103));
-        const wchar_t* status = sessionTiming.blocked() ? L"本机锁屏 / 睡眠中 · 三项按 5:1 回补" :
+        const wchar_t* status = sharedMode() ? (timer.state==BreakTimer::State::Resting?L"共同远眺休息中 · 暂停使用累计":
+            isWorking()?L"本机使用中 · 共同倒计时":timer.state==BreakTimer::State::Working?L"本机休息 · 其他设备使用中，继续倒计时":L"全部设备休息 · 共同按 5:1 回补") :
+            sessionTiming.blocked() ? L"本机锁屏 / 睡眠中 · 三项按 5:1 回补" :
             timer.state == BreakTimer::State::Resting ? L"现在看向远处，让眼睛放松" :
             timer.state == BreakTimer::State::Waiting ? L"休息完成 · 点击继续，或操作鼠标 / 键盘 / 手柄" :
             timer.state == BreakTimer::State::Away ? L"休息回补中（5 倍）· 新操作后自动继续" :

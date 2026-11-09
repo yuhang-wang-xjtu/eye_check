@@ -27,6 +27,13 @@ class Session(now: Long = System.currentTimeMillis()) : Serializable {
     var options = Options()
     var usage = sortedMapOf<String, Long>()
     var revision = 0L
+    var coordinated = false
+    var devicePhase = Phase.WAITING
+    var deviceRevision = 0L
+    var restCycle = 0L
+    var restFinished = 0L
+    var restEndAlertedCycle = 0L
+    var roomKey = ""
     var zone = ZoneId.systemDefault().id
 
     fun remainingAt(now: Long): Long = when (phase) {
