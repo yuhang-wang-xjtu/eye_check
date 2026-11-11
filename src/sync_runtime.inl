@@ -64,7 +64,7 @@ void enterShared() {
     syncActive=true; sessionTiming.externalAuthority=true; pendingUnavailable=false;
     if(sessionTiming.blocked()) { pendingUnavailable=true; syncInactiveAt=now; ++availabilityEpoch; }
     timer.state=BreakTimer::State::Paused; syncHasSnapshot=false;
-    if(healthWindow) DestroyWindow(healthWindow);
+    dismissReminder();
     releaseReminderWindow();
     if(window) refresh();
 }

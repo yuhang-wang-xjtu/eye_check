@@ -16,6 +16,7 @@
 #include "diagnostics.h"
 #include "sync_client.h"
 #include "update_checker.h"
+#include "reminder_keys.h"
 
 namespace {
 constexpr UINT TrayMessage = WM_APP + 1;
@@ -23,7 +24,11 @@ constexpr int Toggle = 101, Rest = 102, Hide = 103, Quit = 104, Open = 105, Sett
 const wchar_t* ClassName = L"EyeBreak202020Window";
 HWND window = nullptr, toggleButton = nullptr, restButton = nullptr, hideButton = nullptr, settingsButton = nullptr;
 HWND usageButton = nullptr, syncButton = nullptr, updateButton = nullptr;
-HWND healthWindow = nullptr, settingsWindow = nullptr, usageWindow = nullptr;
+HWND reminderWindow = nullptr, settingsWindow = nullptr, usageWindow = nullptr;
+enum class EyeNotice { None, Start, End };
+EyeNotice eyeNotice=EyeNotice::None;
+ReminderKeys reminderKeys;
+DWORD reminderOpenedAt=0;
 DailyUsage dailyUsage;
 std::wstring usageFile;
 bool usageStorageOk = true;
@@ -62,6 +67,9 @@ bool sendSync(const std::string& action,const AppSettings* draft);
 bool sharedMode();
 BreakTimer::State interactionState();
 bool saveReminderSettings(const AppSettings& draft);
+std::wstring clockText();
+void updateReminderText();
+void dismissReminder();
 std::wstring usageDuration(std::uint64_t milliseconds) {
     const auto seconds=milliseconds/1000;
     return std::to_wstring(seconds/3600)+L" 小时 "+std::to_wstring(seconds/60%60)+L" 分 "+std::to_wstring(seconds%60)+L" 秒";
@@ -105,8 +113,8 @@ void applyAppearance() {
     HBRUSH old=background; background=CreateSolidBrush(bg);
     if(window) { SetClassLongPtrW(window,GCLP_HBRBACKGROUND,reinterpret_cast<LONG_PTR>(background)); Theme::titlebar(window); }
     if(old) DeleteObject(old);
-    for(HWND dialog : {settingsWindow,healthWindow,usageWindow}) if(dialog) Theme::apply(dialog);
-    for(HWND target : {window,settingsWindow,healthWindow,usageWindow,desktopIcon})
+    for(HWND dialog : {settingsWindow,reminderWindow,usageWindow}) if(dialog) Theme::apply(dialog);
+    for(HWND target : {window,settingsWindow,reminderWindow,usageWindow,desktopIcon})
         if(target) RedrawWindow(target,nullptr,nullptr,RDW_INVALIDATE|RDW_ERASE|RDW_ALLCHILDREN|RDW_FRAME);
 }
 void updateMainFonts(UINT dpi) {
@@ -137,35 +145,86 @@ void bringReminderForward(HWND target) {
         FlashWindowEx(&flash);
     }
 }
-INT_PTR CALLBACK healthProc(HWND dialog, UINT message, WPARAM wparam, LPARAM lparam) {
+void dismissReminder() {
+    if(!reminderWindow) return;
+    inputBoundary=GetTickCount(); deviceInput.resetMotion();
+    PlaySoundW(nullptr,nullptr,0);
+    if(trayPresent) {
+        NOTIFYICONDATAW n{}; n.cbSize=sizeof(n); n.hWnd=window; n.uID=1; n.uFlags=NIF_INFO;
+        Shell_NotifyIconW(NIM_MODIFY,&n);
+    }
+    DestroyWindow(reminderWindow);
+}
+bool dismissReminderKey(unsigned key,bool repeated,DWORD eventTime) {
+    if(reminderKeys.down(key)) return true;
+    if(!reminderWindow) return false;
+    const auto age=eventTime-reminderOpenedAt;
+    if(repeated || age>=0x80000000U) return true;
+    reminderKeys.dismiss(key); dismissReminder(); return true;
+}
+LRESULT CALLBACK reminderControl(HWND control,UINT message,WPARAM w,LPARAM l,UINT_PTR,DWORD_PTR) {
+    if(message==WM_KEYDOWN || message==WM_SYSKEYDOWN) {
+        if(dismissReminderKey(static_cast<unsigned>(w),(l&(1LL<<30))!=0,GetTickCount())) return 0;
+    }
+    if((message==WM_KEYUP || message==WM_SYSKEYUP) && reminderKeys.up(static_cast<unsigned>(w))) return 0;
+    if(message==WM_NCDESTROY) RemoveWindowSubclass(control,reminderControl,17);
+    return DefSubclassProc(control,message,w,l);
+}
+INT_PTR CALLBACK reminderProc(HWND dialog, UINT message, WPARAM wparam, LPARAM lparam) {
     if(Dpi::dialogScrollMessage(dialog,message,wparam,lparam)) return TRUE;
-    if (message == WM_INITDIALOG || message == RefreshDialogDpi) { Theme::apply(dialog); Dpi::fitDialog(dialog); return TRUE; }
+    if (message == WM_INITDIALOG || message == RefreshDialogDpi) {
+        Theme::apply(dialog); Dpi::fitDialog(dialog);
+        if(message==WM_INITDIALOG) for(int id:{IDOK,IDC_IMMEDIATE_REST,IDC_END_WORK}) SetWindowSubclass(GetDlgItem(dialog,id),reminderControl,17,0);
+        return TRUE;
+    }
     if (message == WM_DPICHANGED) { PostMessageW(dialog,RefreshDialogDpi,0,0); return FALSE; }
+    if(message==WM_KEYDOWN || message==WM_SYSKEYDOWN) return dismissReminderKey(static_cast<unsigned>(wparam),(lparam&(1LL<<30))!=0,GetTickCount());
     if (const auto result = Theme::dialogMessage(dialog, message, wparam, lparam)) return result;
     if (message == WM_COMMAND) {
         if (LOWORD(wparam) == IDC_IMMEDIATE_REST) {
-            DestroyWindow(dialog); command(Rest); return TRUE;
+            dismissReminder(); command(Rest); return TRUE;
         }
-        if (LOWORD(wparam) == IDC_STOOD_UP) command(StoodUp);
-        else if (LOWORD(wparam) == IDC_END_WORK) command(EndWork);
+        if (LOWORD(wparam) == IDC_STOOD_UP) { dismissReminder(); command(StoodUp); return TRUE; }
+        else if (LOWORD(wparam) == IDC_END_WORK) { dismissReminder(); command(EndWork); return TRUE; }
         else if (LOWORD(wparam) != IDOK && LOWORD(wparam) != IDCANCEL) return FALSE;
-        DestroyWindow(dialog); return TRUE;
+        for(int key:{VK_RETURN,VK_SPACE,VK_ESCAPE}) if(GetAsyncKeyState(key)&0x8000) reminderKeys.dismiss(key);
+        dismissReminder(); return TRUE;
     }
-    if (message == WM_CLOSE) { DestroyWindow(dialog); return TRUE; }
-    if (message == WM_DESTROY) { healthWindow = nullptr; displayedEvents = 0; return TRUE; }
+    if (message == WM_CLOSE) { dismissReminder(); return TRUE; }
+    if (message == WM_DESTROY) { reminderWindow = nullptr; displayedEvents = 0; eyeNotice=EyeNotice::None; return TRUE; }
     return FALSE;
 }
-void showHealthReminder(int events, bool withSound) {
-    displayedEvents |= events;
-    if (!healthWindow) healthWindow = CreateDialogParamW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDD_HEALTH), nullptr, healthProc, 0);
-    if (!healthWindow) { MessageBoxW(window, L"健康提醒窗口创建失败。请重启软件。", L"20·20·20", MB_OK | MB_ICONWARNING); return; }
+void updateReminderText() {
+    if(!reminderWindow) return;
     std::wstring text;
+    if(eyeNotice==EyeNotice::Start) text=L"请看向约 6 米远的地方，让眼睛休息。\r\n休息还剩 "+clockText()+L"；关闭提醒不会跳过休息。\r\n\r\n";
+    if(eyeNotice==EyeNotice::End) text=isWorking()?L"休息已完成，本机正在使用。\r\n按任意键可关闭此提醒。\r\n\r\n":L"休息已完成。\r\n按任意键关闭此提醒；之后再操作鼠标、键盘或手柄，即可恢复本机使用。\r\n\r\n";
     if (displayedEvents & HealthReminders::Sitting) text += L"久坐提醒：已累计 " + std::to_wstring(health.sittingMs / 60000) + L" 分钟，请起身活动。\r\n\r\n";
     if (displayedEvents & HealthReminders::LongWork) text += L"工作过长：本轮已累计 " + std::to_wstring(health.workMs / 60000) + L" 分钟，请安排一段较长休息。\r\n\r\n";
     if (displayedEvents & HealthReminders::LateNight) text += L"深夜提醒：已经进入设定的深夜时段，请考虑结束工作。";
-    SetDlgItemTextW(healthWindow, IDC_HEALTH_TEXT, text.c_str());
+    SetWindowTextW(reminderWindow,eyeNotice==EyeNotice::Start?L"远眺休息提醒":eyeNotice==EyeNotice::End?L"休息完成":L"健康提醒");
+    SetDlgItemTextW(reminderWindow, IDC_HEALTH_TEXT, text.c_str());
+    ShowWindow(GetDlgItem(reminderWindow,IDC_IMMEDIATE_REST),displayedEvents && isWorking()?SW_SHOW:SW_HIDE);
+    ShowWindow(GetDlgItem(reminderWindow,IDC_END_WORK),displayedEvents && isWorking()?SW_SHOW:SW_HIDE);
+}
+void showAutomaticReminder(EyeNotice notice,int events,bool withSound) {
+    displayedEvents|=events;
+    if(notice!=EyeNotice::None) eyeNotice=notice;
+    if(!reminderWindow) reminderWindow=CreateDialogParamW(GetModuleHandleW(nullptr),MAKEINTRESOURCEW(IDD_HEALTH),nullptr,reminderProc,0);
+    if(!reminderWindow) { Diagnostics::write("reminder-window-failed",timer.state,timer.state); return; }
+    reminderOpenedAt=GetTickCount();
+    updateReminderText();
     if (withSound) playReminderSound(settings.soundPath, settings.soundEnabled);
-    bringReminderForward(healthWindow);
+    bringReminderForward(reminderWindow);
+    if(GetForegroundWindow()==reminderWindow) SetFocus(GetDlgItem(reminderWindow,IDOK));
+}
+void showHealthReminder(int events,bool withSound) { showAutomaticReminder(EyeNotice::None,events,withSound); }
+bool reminderMessage(const MSG& message) {
+    if(message.message==WM_KEYDOWN || message.message==WM_SYSKEYDOWN)
+        return dismissReminderKey(static_cast<unsigned>(message.wParam),(message.lParam&(1LL<<30))!=0,message.time);
+    if(message.message==WM_KEYUP || message.message==WM_SYSKEYUP) return reminderKeys.up(static_cast<unsigned>(message.wParam));
+    if(message.message==WM_CHAR || message.message==WM_SYSCHAR || message.message==WM_UNICHAR) return reminderKeys.active();
+    return false;
 }
 int dueHealthReminders(bool active) {
     SYSTEMTIME local{}; GetLocalTime(&local);
@@ -289,6 +348,11 @@ bool addTray() {
     return trayPresent;
 }
 void refresh() {
+    if(reminderWindow && eyeNotice==EyeNotice::Start && timer.state!=BreakTimer::State::Resting) {
+        if(displayedEvents) eyeNotice=EyeNotice::None;
+        else dismissReminder();
+    }
+    updateReminderText();
     SetWindowTextW(toggleButton, toggleLabel());
     EnableWindow(toggleButton, !sessionTiming.blocked() && (!sharedMode() || syncCanCommand()));
     SetWindowTextW(restButton, restLabel().c_str());
@@ -324,6 +388,7 @@ void onInputResumed(std::uint64_t now) {
     hideAfterRest = false; refresh();
 }
 bool resumeFromInput(const char* source,DWORD eventTime) {
+    if(reminderWindow || reminderKeys.active()) return false;
     const auto state=interactionState();
     if(sharedMode() && timer.state==BreakTimer::State::Resting) return false;
     if(sessionTiming.blocked() || (state!=BreakTimer::State::Waiting && state!=BreakTimer::State::Away)) return false;
@@ -342,18 +407,15 @@ void restCompleted() {
     deviceInput.resetMotion();
     // Completion is a notification only; it must never resume the work timer.
     refresh();
-    playReminderSound(settings.soundPath, settings.soundEnabled);
     if (trayPresent) {
         NOTIFYICONDATAW n{}; n.cbSize = sizeof(n); n.hWnd = window; n.uID = 1; n.uFlags = NIF_INFO;
         wcscpy_s(n.szInfoTitle, L"休息完成");
         wcscpy_s(n.szInfo, isWorking() ? L"休息已结束，本机正在使用。" : L"休息完成。本机仍在休息；点击继续或操作本机鼠标、键盘、手柄后恢复本机使用。");
         n.dwInfoFlags = NIIF_INFO | NIIF_NOSOUND; Shell_NotifyIconW(NIM_MODIFY, &n);
     }
-    bringReminderForward(window);
-    if (GetForegroundWindow() == window) SetFocus(toggleButton);
+    showAutomaticReminder(EyeNotice::End,0,true);
 }
 void beginRest(bool notify) {
-    hideAfterRest = !IsWindowVisible(window);
     if (notify && trayPresent) {
         NOTIFYICONDATAW n{}; n.cbSize = sizeof(n); n.hWnd = window; n.uID = 1; n.uFlags = NIF_INFO;
         wcscpy_s(n.szInfoTitle, L"该让眼睛休息了");
@@ -363,9 +425,7 @@ void beginRest(bool notify) {
     }
     refresh();
     // Embedded audio is independent of the Windows notification sound setting.
-    playReminderSound(settings.soundPath, settings.soundEnabled);
-    bringReminderForward(window);
-    if (GetForegroundWindow() == window) SetFocus(restButton);
+    showAutomaticReminder(EyeNotice::Start,0,true);
 }
 #include "sync_runtime.inl"
 #include "update_runtime.inl"
@@ -415,7 +475,7 @@ void command(int id) {
             const bool valid = GetLastInputInfo(&input) != FALSE;
             timer.away(now, input.dwTime, valid); awayInputArmed = false; inputBoundary=GetTickCount(); deviceInput.resetMotion();
             PlaySoundW(nullptr, nullptr, 0);
-            if (healthWindow) DestroyWindow(healthWindow);
+            dismissReminder();
             releaseReminderWindow(); hideAfterRest = false; hideWindow();
         }
         break;
@@ -615,15 +675,24 @@ LRESULT CALLBACK proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
         auto info = reinterpret_cast<MINMAXINFO*>(lparam); info->ptMinTrackSize = {size.cx,size.cy}; return 0;
     }
     case WM_COMMAND: command(LOWORD(wparam)); return 0;
-    case WM_HOTKEY: if (wparam == 1) command(Away); return 0;
+    case WM_HOTKEY:
+        if(reminderWindow) { dismissReminderKey('L',false,GetTickCount()); return 0; }
+        if(!reminderKeys.active() && wparam == 1) command(Away); return 0;
     case WM_INPUT: {
-        if (!sessionTiming.blocked() && deviceInput.raw(reinterpret_cast<HRAWINPUT>(lparam))) {
-            resumeFromInput(deviceInput.source,static_cast<DWORD>(GetMessageTime()));
+        if (!sessionTiming.blocked()) {
+            const bool changed=deviceInput.raw(reinterpret_cast<HRAWINPUT>(lparam));
+            bool consumed=false;
+            if(deviceInput.keyboardReport) {
+                if(!deviceInput.keyboardDown) consumed=reminderKeys.up(deviceInput.keyboardKey);
+                else if(changed) consumed=dismissReminderKey(deviceInput.keyboardKey,false,static_cast<DWORD>(GetMessageTime()));
+            }
+            if(changed && !consumed) resumeFromInput(deviceInput.source,static_cast<DWORD>(GetMessageTime()));
         }
         // DefWindowProc performs required cleanup for foreground raw input.
         return DefWindowProcW(hwnd, message, wparam, lparam);
     }
     case WM_INPUT_DEVICE_CHANGE:
+        if(wparam==GIDC_REMOVAL) reminderKeys.reset();
         deviceInput.forget(static_cast<std::uintptr_t>(lparam)); return 0;
     case WM_TIMER: {
         static ULONGLONG previousSecond = 0, lastUsageSave = 0;
@@ -664,13 +733,14 @@ LRESULT CALLBACK proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
         if (wparam == WTS_SESSION_LOCK) {
             sessionTiming.lock(GetTickCount64());
             PlaySoundW(nullptr, nullptr, 0); releaseReminderWindow();
-            if (healthWindow) DestroyWindow(healthWindow);
+            dismissReminder();
         } else if (wparam == WTS_SESSION_UNLOCK) {
             sessionTiming.unlock(GetTickCount64()); deviceInput.reset(); awayInputArmed = false;
             LASTINPUTINFO input{sizeof(input), 0};
             if (GetLastInputInfo(&input)) { timer.waitingInput = input.dwTime; timer.inputBaselineValid = true; }
         }
         inputBoundary=GetTickCount(); awayInputArmed=false;
+        reminderKeys.reset();
         syncAvailabilityChanged();
         Diagnostics::write(wparam==WTS_SESSION_LOCK?"session-lock":"session-unlock",beforeSession,timer.state);
         persistUsage(); refresh(); return 0;
@@ -678,10 +748,12 @@ LRESULT CALLBACK proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     case WM_POWERBROADCAST: {
         const auto beforePower=timer.state;
         if (wparam == PBT_APMSUSPEND) sessionTiming.suspend(GetTickCount64());
+        if (wparam == PBT_APMSUSPEND) dismissReminder();
         if (wparam == PBT_APMRESUMEAUTOMATIC || wparam == PBT_APMRESUMESUSPEND) {
             sessionTiming.wake(GetTickCount64()); deviceInput.reset();
         }
         inputBoundary=GetTickCount(); awayInputArmed=false;
+        reminderKeys.reset();
         syncAvailabilityChanged();
         Diagnostics::write(wparam==PBT_APMSUSPEND?"suspend":"wake",beforePower,timer.state);
         persistUsage(); refresh();
@@ -738,7 +810,7 @@ LRESULT CALLBACK proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
         deviceInput.detach();
         UnregisterHotKey(hwnd, 1);
         if (desktopIcon) DestroyWindow(desktopIcon);
-        if (healthWindow) DestroyWindow(healthWindow);
+        dismissReminder();
         PlaySoundW(nullptr, nullptr, 0);
         KillTimer(hwnd, 1); removeTray(); DeleteObject(titleFont); DeleteObject(bodyFont); DeleteObject(clockFont); DeleteObject(captionFont); PostQuitMessage(0); return 0;
     }
@@ -786,7 +858,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     ShowWindow(window, show); UpdateWindow(window);
     MSG message{};
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {
-        if (healthWindow && IsDialogMessageW(healthWindow, &message)) continue;
+        if (reminderMessage(message)) continue;
+        if (reminderWindow && IsDialogMessageW(reminderWindow, &message)) continue;
         if (!IsDialogMessageW(window, &message)) { TranslateMessage(&message); DispatchMessageW(&message); }
     }
     DeleteObject(background); CloseHandle(singleton); return 0;

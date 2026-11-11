@@ -31,6 +31,8 @@ public:
         return false;
     }
     const char* source="hid";
+    bool keyboardReport=false, keyboardDown=false;
+    USHORT keyboardKey=0;
     bool presses(std::uintptr_t device,unsigned key,const std::vector<LONG>& values) {
         auto found=reports.find({device,key});
         if(found==reports.end()) { reports[{device,key}]=values; return false; }
@@ -134,6 +136,7 @@ public:
         reset();
     }
     bool raw(HRAWINPUT handle) {
+        keyboardReport=false; keyboardKey=0;
         UINT size = 0;
         if (GetRawInputData(handle, RID_INPUT, nullptr, &size, sizeof(RAWINPUTHEADER)) != 0 || size > 1024 * 1024) return false;
         std::vector<DWORD> buffer((size + sizeof(DWORD) - 1) / sizeof(DWORD));
@@ -145,6 +148,7 @@ public:
         }
         if(input->header.dwType==RIM_TYPEKEYBOARD && size>=offsetof(RAWINPUT,data)+sizeof(RAWKEYBOARD)) {
             source="raw-keyboard";
+            keyboardReport=true; keyboardKey=input->data.keyboard.VKey; keyboardDown=!(input->data.keyboard.Flags&RI_KEY_BREAK);
             return input->data.keyboard.VKey!=255 && key(reinterpret_cast<std::uintptr_t>(input->header.hDevice),input->data.keyboard.VKey,!(input->data.keyboard.Flags&RI_KEY_BREAK));
         }
         source="raw-hid";

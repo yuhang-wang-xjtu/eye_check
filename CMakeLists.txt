@@ -50,3 +50,6 @@ target_compile_definitions(update_tests PRIVATE UNICODE _UNICODE NOMINMAX WIN32_
 target_compile_options(update_tests PRIVATE /W4 /utf-8)
 target_link_libraries(update_tests PRIVATE winhttp crypt32 ole32 bcrypt)
 add_test(NAME update_tests COMMAND update_tests)
+add_executable(reminder_keys_tests tests/reminder_keys_tests.cpp)
+target_compile_options(reminder_keys_tests PRIVATE /W4 /utf-8)
+add_test(NAME reminder_keys_tests COMMAND reminder_keys_tests)

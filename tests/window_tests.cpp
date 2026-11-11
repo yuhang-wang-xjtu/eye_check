@@ -132,11 +132,18 @@ int main(int argc, char** argv) {
     command(Rest);
     check(timer.state==BreakTimer::State::Away,"paused timer can enter immediate recovery rest");
     command(Toggle); timer.rest(GetTickCount64()); beginRest(false);
-    check(timer.state == BreakTimer::State::Resting && IsWindowVisible(window), "automatic eye rest uses fixed duration");
+    check(timer.state == BreakTimer::State::Resting && reminderWindow && IsWindowVisible(reminderWindow) && !IsWindowVisible(window), "automatic eye rest opens its own popup without revealing hidden main window");
+    SendMessageW(GetDlgItem(reminderWindow,IDOK),WM_KEYDOWN,'A',0);
+    check(!reminderWindow && timer.state==BreakTimer::State::Resting && !IsWindowVisible(window),"any key closes start popup without skipping rest or revealing main window");
+    reminderKeys.up('A');
+    showWindow(); RECT manualBefore{},manualAfter{}; GetWindowRect(window,&manualBefore);
+    const auto manualStyle=GetWindowLongPtrW(window,GWL_EXSTYLE);
     timer.deadline = GetTickCount64() - 1;
     SendMessageW(window, WM_TIMER, 1, 0);
-    check(timer.state == BreakTimer::State::Waiting && IsWindowVisible(window), "completion waits with continue window");
-    check((GetWindowLongPtrW(window, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0, "completion reminder stays visible");
+    check(timer.state == BreakTimer::State::Waiting && IsWindowVisible(window) && reminderWindow, "completion waits with independent popup and preserves manually opened main window");
+    check((GetWindowLongPtrW(reminderWindow,GWL_EXSTYLE)&WS_EX_TOPMOST)!=0,"automatic reminder popup stays visible");
+    GetWindowRect(window,&manualAfter);
+    check(EqualRect(&manualBefore,&manualAfter) && GetWindowLongPtrW(window,GWL_EXSTYLE)==manualStyle,"automatic reminder does not move or raise manual main window");
     check(completionAlerts == 1, "completion reminder issued once");
     LASTINPUTINFO input{sizeof(input), 0};
     check(GetLastInputInfo(&input) != FALSE, "input detection available");
@@ -149,10 +156,28 @@ int main(int argc, char** argv) {
     timer.completionInputCutoff = input.dwTime - 1;
     SendMessageW(window, WM_TIMER, 1, 0);
     check(timer.state==BreakTimer::State::Waiting,"changed global input timestamp cannot restart completed rest");
+    MSG closeKey{}; closeKey.hwnd=GetDlgItem(reminderWindow,IDOK); closeKey.message=WM_KEYDOWN; closeKey.wParam=VK_RETURN; closeKey.time=GetTickCount();
+    check(reminderMessage(closeKey) && !reminderWindow && timer.state==BreakTimer::State::Waiting,"Enter dismisses completion instead of continuing work");
+    check(!resumeFromInput("same-dismissal-key",GetTickCount()),"closing key cannot also resume through Raw Input");
+    closeKey.message=WM_CHAR; closeKey.wParam='\r';
+    check(reminderMessage(closeKey),"closing key does not activate default main-window button");
+    closeKey.message=WM_KEYUP; closeKey.wParam=VK_RETURN;
+    check(reminderMessage(closeKey),"release of closing key is consumed");
     inputBoundary=GetTickCount()-1;
     resumeFromInput("test-mouse",GetTickCount());
     check(timer.state == BreakTimer::State::Working && timer.left(GetTickCount64()) > BreakTimer::WorkMs - 1000, "verified input starts full cycle");
     check((GetWindowLongPtrW(window, GWL_EXSTYLE) & WS_EX_TOPMOST) == 0, "resuming releases completion topmost");
+    for(unsigned key:{static_cast<unsigned>(VK_TAB),static_cast<unsigned>(VK_LEFT),static_cast<unsigned>(VK_F5),static_cast<unsigned>(VK_CONTROL)}) {
+        const auto before=timer.state;
+        showHealthReminder(HealthReminders::Sitting|HealthReminders::LongWork|HealthReminders::LateNight,false);
+        SendMessageW(GetDlgItem(reminderWindow,IDOK),WM_KEYDOWN,key,0);
+        check(!reminderWindow && timer.state==before && IsWindowVisible(window),"arbitrary health-popup key closes only popup and preserves work state");
+        SendMessageW(window,WM_HOTKEY,1,0);
+        check(timer.state==before,"closing chord cannot also activate leave hotkey");
+        reminderKeys.up(key);
+    }
+    MSG manualKey{}; manualKey.hwnd=window; manualKey.message=WM_KEYDOWN; manualKey.wParam='B';manualKey.time=GetTickCount();
+    check(!reminderMessage(manualKey) && IsWindowVisible(window),"ordinary keys in manually opened timer are not reminder dismissal");
     timer.finish();
     check(timer.deviceActivity(GetTickCount64()), "external device can resume waiting timer");
     onInputResumed(GetTickCount64());
@@ -191,9 +216,9 @@ int main(int argc, char** argv) {
     }
     timer.state=State::Working; timer.deadline=GetTickCount64()+BreakTimer::WorkMs;
     showHealthReminder(HealthReminders::LateNight,false);
-    check(GetDlgItem(healthWindow,IDC_IMMEDIATE_REST)!=nullptr,"night reminder has the same immediate rest action");
-    SendMessageW(healthWindow,WM_COMMAND,IDC_IMMEDIATE_REST,0);
-    check(timer.state==State::Away && !healthWindow,"night reminder action starts recovery and closes reminder");
+    check(GetDlgItem(reminderWindow,IDC_IMMEDIATE_REST)!=nullptr,"night reminder has the same immediate rest action");
+    SendMessageW(reminderWindow,WM_COMMAND,IDC_IMMEDIATE_REST,0);
+    check(timer.state==State::Away && !reminderWindow,"night reminder action starts recovery and closes reminder");
     HWND statistics=CreateDialogParamW(instance,MAKEINTRESOURCEW(IDD_USAGE),window,usageProc,0);
     check(statistics && SendDlgItemMessageW(statistics,IDC_USAGE_LIST,LB_GETCOUNT,0,0)>=1,"usage page includes today");
     DestroyWindow(statistics);
@@ -231,6 +256,7 @@ int main(int argc, char** argv) {
     projectSync(GetTickCount64());
     check(timer.left(GetTickCount64())>=605000 && health.sittingMs<=45000,"shared away projects all three counters at five to one");
     const auto beforeSharedCompletion=completionAlerts;
+    showWindow();
     syncSnapshot.state=State::Resting; syncSnapshot.deadline=syncSnapshot.serverNow-1;
     syncSnapshot.restCycle=1;
     SharedSync::Result done; done.ok=true; done.status=200; done.received=GetTickCount64(); done.snapshot=syncSnapshot;
@@ -241,6 +267,8 @@ int main(int argc, char** argv) {
     check(timer.state==State::Working && interactionState()==State::Waiting && completionAlerts==beforeSharedCompletion+1,"rest completion notifies locally while phone may resume shared countdown");
     pumpSync(GetTickCount64());
     check(interactionState()==State::Waiting && completionAlerts==beforeSharedCompletion+1,"repainting shared waiting never resumes this PC or repeats sound");
+    SendMessageW(reminderWindow,WM_KEYDOWN,VK_ESCAPE,0); reminderKeys.up(VK_ESCAPE);
+    check(interactionState()==State::Waiting && !reminderWindow && IsWindowVisible(window),"shared completion Escape closes only automatic popup");
     settings.restSeconds=40;
     std::promise<SharedSync::Result> stalePromise; syncFuture=stalePromise.get_future(); requestGeneration=syncGeneration;
     leaveShared();
