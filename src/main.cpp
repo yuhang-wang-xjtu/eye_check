@@ -17,6 +17,7 @@
 #include "sync_client.h"
 #include "update_checker.h"
 #include "update_installer.h"
+#include "startup.h"
 #include "reminder_keys.h"
 #include "reminder_watch.h"
 
@@ -337,6 +338,7 @@ INT_PTR CALLBACK settingsProc(HWND dialog, UINT message, WPARAM wparam, LPARAM l
         SetDlgItemInt(dialog, IDC_REST_SECONDS, settings.restSeconds, FALSE);
         CheckDlgButton(dialog, IDC_DESKTOP_ICON, settings.desktopIconEnabled ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(dialog, IDC_LIGHT_MODE, settings.lightMode ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(dialog, IDC_STARTUP, Startup::enabled() ? BST_CHECKED : BST_UNCHECKED);
         SetDlgItemTextW(dialog, IDC_SOUND_PATH, pendingSound.empty() ? L"内置提示音" : pendingSound.c_str());
         for (int id : {IDC_SITTING_MINUTES, IDC_WORK_MINUTES, IDC_NIGHT_HOUR, IDC_NIGHT_MINUTE, IDC_REST_SECONDS})
             SendDlgItemMessageW(dialog, id, EM_SETLIMITTEXT, 3, 0);
@@ -391,8 +393,11 @@ INT_PTR CALLBACK settingsProc(HWND dialog, UINT message, WPARAM wparam, LPARAM l
                 draft.soundPath = copy;
             }
             if (!saveReminderSettings(draft)) { MessageBoxW(dialog, L"无法保存。共享模式请等待连接完成后重试；本地模式请检查目录权限。", L"保存失败", MB_OK | MB_ICONWARNING); return TRUE; }
+            const bool startupSaved=Startup::setEnabled(IsDlgButtonChecked(dialog,IDC_STARTUP)==BST_CHECKED);
             timer.restDurationMs = static_cast<std::uint64_t>(settings.restSeconds) * 1000;
-            applyAppearance(); syncDesktopIcon(); refresh(); EndDialog(dialog, IDOK); return TRUE;
+            applyAppearance(); syncDesktopIcon(); refresh();
+            if(!startupSaved) {MessageBoxW(dialog,L"提醒设置已保存，但无法修改开机自启设置，请检查当前用户的注册表写入权限。",L"开机自启设置失败",MB_OK|MB_ICONWARNING);return TRUE;}
+            EndDialog(dialog, IDOK); return TRUE;
         }
         case IDCANCEL: EndDialog(dialog, IDCANCEL); return TRUE;
         }
@@ -935,19 +940,23 @@ LRESULT CALLBACK proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
 }
 }
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
+    bool startupLaunch=false;
     try {
         const auto args=Updates::arguments();
         if(args.size()>1 && args[1]==L"--apply-update")return args.size()==3?Updates::runInstaller(args[2]):1;
         if(args.size()==4 && args[1]==L"--updated"){updateStartup.startedEvent=args[2];updateStartup.state=args[3];}
         if(args.size()==3 && args[1]==L"--update-rollback")updateStartup.state=args[2];
+        if(args.size()==2 && args[1]==L"--startup"){show=SW_HIDE;startupLaunch=true;}
     } catch(...) {return 1;}
     HANDLE singleton = CreateMutexW(nullptr, FALSE, L"Local\\EyeBreak202020.Singleton");
     if (!singleton) return 1;
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         HWND existing = FindWindowW(ClassName, nullptr);
-        if (existing) PostMessageW(existing, WM_COMMAND, Open, 0);
+        if (existing && !startupLaunch) PostMessageW(existing, WM_COMMAND, Open, 0);
         CloseHandle(singleton); return 0;
     }
+    // Keep an existing opt-in pointed at this portable executable after a move.
+    if(Startup::enabled())Startup::setEnabled(true);
     Dpi::enable(); background = CreateSolidBrush(bg);
     wchar_t appData[MAX_PATH]{};
     if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, appData))) {

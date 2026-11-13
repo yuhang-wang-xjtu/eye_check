@@ -26,6 +26,7 @@
 #define IDC_RETURN_HELP 420
 #define IDC_HEALTH_HELP 421
 #define IDC_LIGHT_MODE 422
+#define IDC_STARTUP 426
 #define IDI_APP 101
 #define IDD_SYNC 304
 #define IDC_SYNC_URL 430
