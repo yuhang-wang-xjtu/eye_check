@@ -44,7 +44,7 @@ CAPTION "健康提醒"
 FONT UI_BODY_POINTS, UI_FONT_FACE
 BEGIN
     LTEXT "", IDC_HEALTH_TEXT, 12, 12, 265, 104
-    LTEXT "按任意键或点击关闭，仅关闭提醒。\n不会跳过休息或自动继续；主窗口保持原样。", IDC_HEALTH_HELP, 12, 119, 265, 30
+    LTEXT "键盘 / 手柄按键、点击窗口外或关闭按钮均可关闭。\n仅关闭提醒，不跳过休息；主窗口保持原样。", IDC_HEALTH_HELP, 12, 119, 265, 30
     PUSHBUTTON "立即休息", IDC_IMMEDIATE_REST, 12, 158, 88, 20
     PUSHBUTTON "结束本轮工作", IDC_END_WORK, 105, 158, 88, 20
     DEFPUSHBUTTON "关闭", IDOK, 199, 158, 78, 20

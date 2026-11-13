@@ -17,6 +17,7 @@
 #include "sync_client.h"
 #include "update_checker.h"
 #include "reminder_keys.h"
+#include "reminder_watch.h"
 
 namespace {
 constexpr UINT TrayMessage = WM_APP + 1;
@@ -28,6 +29,9 @@ HWND reminderWindow = nullptr, settingsWindow = nullptr, usageWindow = nullptr;
 enum class EyeNotice { None, Start, End };
 EyeNotice eyeNotice=EyeNotice::None;
 ReminderKeys reminderKeys;
+ReminderWatch reminderWatch;
+bool controllerDismissHeld=false, outsideClickCommandFence=false;
+constexpr UINT_PTR ReminderPollTimer=2;
 DWORD reminderOpenedAt=0;
 DailyUsage dailyUsage;
 std::wstring usageFile;
@@ -70,6 +74,7 @@ bool saveReminderSettings(const AppSettings& draft);
 std::wstring clockText();
 void updateReminderText();
 void dismissReminder();
+void updateReminderPolling();
 std::wstring usageDuration(std::uint64_t milliseconds) {
     const auto seconds=milliseconds/1000;
     return std::to_wstring(seconds/3600)+L" 小时 "+std::to_wstring(seconds/60%60)+L" 分 "+std::to_wstring(seconds%60)+L" 秒";
@@ -145,7 +150,9 @@ void bringReminderForward(HWND target) {
         FlashWindowEx(&flash);
     }
 }
-void dismissReminder() {
+void dismissReminder(const char* reason);
+void dismissReminder() { dismissReminder("reminder-dismiss"); }
+void dismissReminder(const char* reason) {
     if(!reminderWindow) return;
     inputBoundary=GetTickCount(); deviceInput.resetMotion();
     PlaySoundW(nullptr,nullptr,0);
@@ -154,13 +161,65 @@ void dismissReminder() {
         Shell_NotifyIconW(NIM_MODIFY,&n);
     }
     DestroyWindow(reminderWindow);
+    Diagnostics::write(reason,timer.state,timer.state);
+    updateReminderPolling();
 }
 bool dismissReminderKey(unsigned key,bool repeated,DWORD eventTime) {
-    if(reminderKeys.down(key)) return true;
-    if(!reminderWindow) return false;
+    reminderWatch.press(key);
+    if(!reminderWindow) {
+        if(reminderKeys.down(key)) return true;
+        outsideClickCommandFence=false; return false;
+    }
     const auto age=eventTime-reminderOpenedAt;
     if(repeated || age>=0x80000000U) return true;
-    reminderKeys.dismiss(key); dismissReminder(); return true;
+    reminderKeys.dismiss(key); dismissReminder("reminder-key"); return true;
+}
+std::array<bool,256> physicalKeys() {
+    std::array<bool,256> keys{};
+    for(unsigned key=1;key<keys.size();++key) keys[key]=(GetAsyncKeyState(static_cast<int>(key))&0x8000)!=0;
+    return keys; // Never use the unreliable low "pressed since last call" bit.
+}
+bool mouseKey(unsigned key) { return key==VK_LBUTTON || key==VK_RBUTTON || key==VK_MBUTTON || key==VK_XBUTTON1 || key==VK_XBUTTON2; }
+void updateReminderPolling() {
+    if(!window) return;
+    if(reminderWindow || reminderKeys.active() || controllerDismissHeld) SetTimer(window,ReminderPollTimer,40,nullptr);
+    else KillTimer(window,ReminderPollTimer);
+}
+bool dismissOutsideClick(POINT point,unsigned key,DWORD eventTime,bool fresh=true) {
+    reminderWatch.press(key);
+    if(!reminderWindow) { if(fresh) outsideClickCommandFence=false; return false; }
+    RECT rect{}; if(!GetWindowRect(reminderWindow,&rect) || PtInRect(&rect,point)) return false;
+    if(eventTime-reminderOpenedAt>=0x80000000U) return true;
+    reminderKeys.dismiss(key); outsideClickCommandFence=true;
+    dismissReminder("reminder-outside-click"); return true;
+}
+bool dismissControllerPress(DWORD eventTime) {
+    if(!reminderWindow) return false;
+    if(eventTime-reminderOpenedAt>=0x80000000U) return true;
+    controllerDismissHeld=true;
+    dismissReminder("reminder-controller"); return true;
+}
+void applyReminderKeySample(const std::array<bool,256>& down) {
+    auto presses=reminderWatch.sample(down);
+    for(unsigned key=1;key<down.size();++key) if(!down[key]) reminderKeys.up(key);
+    deviceInput.releaseUnheldKeys(down);
+    const auto now=GetTickCount();
+    for(auto key:presses) {
+        if(mouseKey(key)) { POINT point{}; if(GetCursorPos(&point)) dismissOutsideClick(point,key,now); }
+        else dismissReminderKey(key,false,now);
+    }
+}
+bool handleControllerReminder(bool pressed,DWORD time) {
+    if(controllerDismissHeld && !deviceInput.controllerButtonsHeld()) controllerDismissHeld=false;
+    if(pressed && dismissControllerPress(time)) return true;
+    return controllerDismissHeld;
+}
+void pollReminderInputs() {
+    if(sessionTiming.blocked()) { reminderKeys.reset(); controllerDismissHeld=false; updateReminderPolling(); return; }
+    applyReminderKeySample(physicalKeys());
+    deviceInput.pollControllers();
+    handleControllerReminder(deviceInput.buttonPress,GetTickCount());
+    updateReminderPolling();
 }
 LRESULT CALLBACK reminderControl(HWND control,UINT message,WPARAM w,LPARAM l,UINT_PTR,DWORD_PTR) {
     if(message==WM_KEYDOWN || message==WM_SYSKEYDOWN) {
@@ -213,16 +272,39 @@ void showAutomaticReminder(EyeNotice notice,int events,bool withSound) {
     if(!reminderWindow) reminderWindow=CreateDialogParamW(GetModuleHandleW(nullptr),MAKEINTRESOURCEW(IDD_HEALTH),nullptr,reminderProc,0);
     if(!reminderWindow) { Diagnostics::write("reminder-window-failed",timer.state,timer.state); return; }
     reminderOpenedAt=GetTickCount();
+    auto keys=physicalKeys(); reminderWatch.prime(keys); deviceInput.releaseUnheldKeys(keys);
+    for(unsigned key=1;key<keys.size();++key) if(!keys[key]) reminderKeys.up(key);
+    deviceInput.pollControllers(); // Establish baseline; already-held controls do not dismiss.
     updateReminderText();
     if (withSound) playReminderSound(settings.soundPath, settings.soundEnabled);
     bringReminderForward(reminderWindow);
     if(GetForegroundWindow()==reminderWindow) SetFocus(GetDlgItem(reminderWindow,IDOK));
+    Diagnostics::write(GetForegroundWindow()==reminderWindow?"reminder-shown-foreground":"reminder-shown-background",timer.state,timer.state);
+    updateReminderPolling();
 }
 void showHealthReminder(int events,bool withSound) { showAutomaticReminder(EyeNotice::None,events,withSound); }
 bool reminderMessage(const MSG& message) {
+    unsigned pointerKey=0; bool pointerDown=false;
+    switch(message.message) {
+    case WM_LBUTTONDOWN: pointerDown=true; [[fallthrough]];
+    case WM_LBUTTONUP: pointerKey=VK_LBUTTON; break;
+    case WM_RBUTTONDOWN: pointerDown=true; [[fallthrough]];
+    case WM_RBUTTONUP: pointerKey=VK_RBUTTON; break;
+    case WM_MBUTTONDOWN: pointerDown=true; [[fallthrough]];
+    case WM_MBUTTONUP: pointerKey=VK_MBUTTON; break;
+    case WM_XBUTTONDOWN: pointerDown=true; [[fallthrough]];
+    case WM_XBUTTONUP: pointerKey=HIWORD(message.wParam)==XBUTTON1?VK_XBUTTON1:VK_XBUTTON2; break;
+    }
+    if(pointerKey) {
+        if(pointerDown) {
+            const bool fresh=reminderWatch.press(pointerKey);
+            return dismissOutsideClick(message.pt,pointerKey,message.time,fresh) || reminderKeys.active();
+        }
+        reminderWatch.release(pointerKey); return reminderKeys.up(pointerKey);
+    }
     if(message.message==WM_KEYDOWN || message.message==WM_SYSKEYDOWN)
         return dismissReminderKey(static_cast<unsigned>(message.wParam),(message.lParam&(1LL<<30))!=0,message.time);
-    if(message.message==WM_KEYUP || message.message==WM_SYSKEYUP) return reminderKeys.up(static_cast<unsigned>(message.wParam));
+    if(message.message==WM_KEYUP || message.message==WM_SYSKEYUP) { reminderWatch.release(static_cast<unsigned>(message.wParam)); return reminderKeys.up(static_cast<unsigned>(message.wParam)); }
     if(message.message==WM_CHAR || message.message==WM_SYSCHAR || message.message==WM_UNICHAR) return reminderKeys.active();
     return false;
 }
@@ -388,7 +470,7 @@ void onInputResumed(std::uint64_t now) {
     hideAfterRest = false; refresh();
 }
 bool resumeFromInput(const char* source,DWORD eventTime) {
-    if(reminderWindow || reminderKeys.active()) return false;
+    if(reminderWindow || reminderKeys.active() || controllerDismissHeld) return false;
     const auto state=interactionState();
     if(sharedMode() && timer.state==BreakTimer::State::Resting) return false;
     if(sessionTiming.blocked() || (state!=BreakTimer::State::Waiting && state!=BreakTimer::State::Away)) return false;
@@ -653,6 +735,7 @@ LRESULT CALLBACK proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
         RECT client{}; GetClientRect(hwnd, &client); layout(client.right, client.bottom);
         awayHotkeyAvailable = RegisterHotKey(hwnd, 1, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'L') != FALSE;
         deviceInput.attach(hwnd);
+        Diagnostics::write(deviceInput.rawAvailable?"raw-input-ready":"raw-input-unavailable",timer.state,timer.state);
         sessionNotificationsAvailable = WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION) != FALSE;
         addTray(); SetTimer(hwnd, 1, 250, nullptr); return 0;
     }
@@ -674,7 +757,13 @@ LRESULT CALLBACK proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
         const auto size=Dpi::outerSize(hwnd,496,384,mainDpi);
         auto info = reinterpret_cast<MINMAXINFO*>(lparam); info->ptMinTrackSize = {size.cx,size.cy}; return 0;
     }
-    case WM_COMMAND: command(LOWORD(wparam)); return 0;
+    case WM_COMMAND:
+        if(lparam && HIWORD(wparam)==BN_CLICKED) {
+            POINT point{};
+            if(reminderWindow && GetCursorPos(&point) && dismissOutsideClick(point,VK_LBUTTON,GetTickCount())) return 0;
+            if(outsideClickCommandFence) return 0;
+        }
+        command(LOWORD(wparam)); return 0;
     case WM_HOTKEY:
         if(reminderWindow) { dismissReminderKey('L',false,GetTickCount()); return 0; }
         if(!reminderKeys.active() && wparam == 1) command(Away); return 0;
@@ -683,9 +772,22 @@ LRESULT CALLBACK proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
             const bool changed=deviceInput.raw(reinterpret_cast<HRAWINPUT>(lparam));
             bool consumed=false;
             if(deviceInput.keyboardReport) {
-                if(!deviceInput.keyboardDown) consumed=reminderKeys.up(deviceInput.keyboardKey);
+                if(!deviceInput.keyboardDown) { reminderWatch.release(deviceInput.keyboardKey); consumed=reminderKeys.up(deviceInput.keyboardKey); }
                 else if(changed) consumed=dismissReminderKey(deviceInput.keyboardKey,false,static_cast<DWORD>(GetMessageTime()));
             }
+            if(deviceInput.mouseReport) {
+                const unsigned keys[]={VK_LBUTTON,VK_RBUTTON,VK_MBUTTON,VK_XBUTTON1,VK_XBUTTON2};
+                const USHORT presses[]={RI_MOUSE_LEFT_BUTTON_DOWN,RI_MOUSE_RIGHT_BUTTON_DOWN,RI_MOUSE_MIDDLE_BUTTON_DOWN,RI_MOUSE_BUTTON_4_DOWN,RI_MOUSE_BUTTON_5_DOWN};
+                const USHORT releases[]={RI_MOUSE_LEFT_BUTTON_UP,RI_MOUSE_RIGHT_BUTTON_UP,RI_MOUSE_MIDDLE_BUTTON_UP,RI_MOUSE_BUTTON_4_UP,RI_MOUSE_BUTTON_5_UP};
+                for(unsigned i=0;i<5;++i) {
+                    if(deviceInput.mouseDown&presses[i]) {
+                        const bool fresh=reminderWatch.press(keys[i]); POINT point{};
+                        if(GetCursorPos(&point)) consumed=dismissOutsideClick(point,keys[i],static_cast<DWORD>(GetMessageTime()),fresh)||consumed;
+                    }
+                    if(deviceInput.mouseUp&releases[i]) { reminderWatch.release(keys[i]); consumed=reminderKeys.up(keys[i])||consumed; }
+                }
+            }
+            if(deviceInput.buttonPress) consumed=handleControllerReminder(true,static_cast<DWORD>(GetMessageTime()))||consumed;
             if(changed && !consumed) resumeFromInput(deviceInput.source,static_cast<DWORD>(GetMessageTime()));
         }
         // DefWindowProc performs required cleanup for foreground raw input.
@@ -695,6 +797,7 @@ LRESULT CALLBACK proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
         if(wparam==GIDC_REMOVAL) reminderKeys.reset();
         deviceInput.forget(static_cast<std::uintptr_t>(lparam)); return 0;
     case WM_TIMER: {
+        if(wparam==ReminderPollTimer) { pollReminderInputs(); return 0; }
         static ULONGLONG previousSecond = 0, lastUsageSave = 0;
         auto now = GetTickCount64(); auto oldState = timer.state;
         sessionTiming.advance(now);
@@ -704,6 +807,7 @@ LRESULT CALLBACK proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
         LASTINPUTINFO input{sizeof(LASTINPUTINFO), 0};
         const bool validInput = GetLastInputInfo(&input) != FALSE;
         const bool controllerChanged = deviceInput.pollControllers();
+        const bool controllerConsumed=handleControllerReminder(deviceInput.buttonPress,static_cast<DWORD>(now));
         const auto inputState=interactionState();
         const bool wasAwayArmed = awayInputArmed;
         if (inputState == BreakTimer::State::Away && !awayInputArmed) {
@@ -714,7 +818,7 @@ LRESULT CALLBACK proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
         }
         // GetLastInputInfo includes injected/system input and is not proof of activity.
         const bool eyeStarted = !syncActive && timer.tick(now);
-        if ((inputState == BreakTimer::State::Waiting || (inputState == BreakTimer::State::Away && wasAwayArmed)) && controllerChanged)
+        if (!controllerConsumed && (inputState == BreakTimer::State::Waiting || (inputState == BreakTimer::State::Away && wasAwayArmed)) && controllerChanged)
             resumeFromInput("xinput",static_cast<DWORD>(now));
         if(syncActive) { if(previousSecond!=now/1000) { refresh(); previousSecond=now/1000; } return 0; }
         if (eyeStarted) beginRest(true);
@@ -741,6 +845,7 @@ LRESULT CALLBACK proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
         }
         inputBoundary=GetTickCount(); awayInputArmed=false;
         reminderKeys.reset();
+        controllerDismissHeld=false; outsideClickCommandFence=false; updateReminderPolling();
         syncAvailabilityChanged();
         Diagnostics::write(wparam==WTS_SESSION_LOCK?"session-lock":"session-unlock",beforeSession,timer.state);
         persistUsage(); refresh(); return 0;
@@ -754,6 +859,7 @@ LRESULT CALLBACK proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
         }
         inputBoundary=GetTickCount(); awayInputArmed=false;
         reminderKeys.reset();
+        controllerDismissHeld=false; outsideClickCommandFence=false; updateReminderPolling();
         syncAvailabilityChanged();
         Diagnostics::write(wparam==PBT_APMSUSPEND?"suspend":"wake",beforePower,timer.state);
         persistUsage(); refresh();
@@ -812,7 +918,7 @@ LRESULT CALLBACK proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
         if (desktopIcon) DestroyWindow(desktopIcon);
         dismissReminder();
         PlaySoundW(nullptr, nullptr, 0);
-        KillTimer(hwnd, 1); removeTray(); DeleteObject(titleFont); DeleteObject(bodyFont); DeleteObject(clockFont); DeleteObject(captionFont); PostQuitMessage(0); return 0;
+        KillTimer(hwnd, 1); KillTimer(hwnd,ReminderPollTimer); removeTray(); DeleteObject(titleFont); DeleteObject(bodyFont); DeleteObject(clockFont); DeleteObject(captionFont); PostQuitMessage(0); return 0;
     }
     return DefWindowProcW(hwnd, message, wparam, lparam);
 }

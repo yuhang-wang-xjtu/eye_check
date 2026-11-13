@@ -33,12 +33,27 @@ public:
     const char* source="hid";
     bool keyboardReport=false, keyboardDown=false;
     USHORT keyboardKey=0;
+    bool buttonPress=false,mouseReport=false;
+    USHORT mouseDown=0,mouseUp=0;
+    void releaseUnheldKeys(const std::array<bool,256>& down) {
+        for(auto& device:heldKeys) for(auto i=device.second.begin();i!=device.second.end();) {
+            if(*i>=down.size() || !down[*i]) i=device.second.erase(i); else ++i;
+        }
+    }
+    bool controllerButtonsHeld() const {
+        for(const auto& report:reports) {
+            const auto key=report.first.second; const auto& values=report.second;
+            if(key==0 && values.size()==7 && (values[0] || values[1] || values[2])) return true;
+            if((key&0xF0000000U)==0x10000000U && !values.empty()) return true;
+        }
+        return false;
+    }
     bool presses(std::uintptr_t device,unsigned key,const std::vector<LONG>& values) {
         auto found=reports.find({device,key});
         if(found==reports.end()) { reports[{device,key}]=values; return false; }
         bool down=false;
         for(auto value:values) if(std::find(found->second.begin(),found->second.end(),value)==found->second.end()) down=true;
-        found->second=values; return down;
+        found->second=values; buttonPress|=down; return down;
     }
     bool motion(std::uintptr_t device,unsigned key,LONG value,LONG center,bool active,bool hat) {
         auto found=reports.find({device,key});
@@ -57,6 +72,7 @@ public:
         auto& old=found->second;
         if(old.size()!=values.size()) { old=values; return false; }
         bool active=(values[0]&~old[0])!=0;
+        buttonPress|=active || values[1]>=old[1]+3 || values[2]>=old[2]+3;
         for(size_t i=1;i<values.size();++i) {
             const LONG center=i>=3?16:0;
             if(std::abs(values[i]-center)>=std::abs(old[i]-center)+3) active=true;
@@ -99,6 +115,7 @@ public:
         return static_cast<LONG>(std::clamp<std::int64_t>(offset * 32 / range, 0, 32));
     }
     bool pollControllers() {
+        buttonPress=false;
         bool changed = false;
         for (DWORD index = 0; index < XUSER_MAX_COUNT; ++index) {
             XINPUT_STATE state{};
@@ -136,7 +153,7 @@ public:
         reset();
     }
     bool raw(HRAWINPUT handle) {
-        keyboardReport=false; keyboardKey=0;
+        keyboardReport=false; keyboardKey=0; buttonPress=false; mouseReport=false; mouseDown=mouseUp=0;
         UINT size = 0;
         if (GetRawInputData(handle, RID_INPUT, nullptr, &size, sizeof(RAWINPUTHEADER)) != 0 || size > 1024 * 1024) return false;
         std::vector<DWORD> buffer((size + sizeof(DWORD) - 1) / sizeof(DWORD));
@@ -144,6 +161,9 @@ public:
         if (size < sizeof(RAWINPUTHEADER)) return false;
         const auto* input = reinterpret_cast<const RAWINPUT*>(buffer.data());
         if(input->header.dwType==RIM_TYPEMOUSE && size>=offsetof(RAWINPUT,data)+sizeof(RAWMOUSE)) {
+            mouseReport=true;
+            mouseDown=input->data.mouse.usButtonFlags&(RI_MOUSE_LEFT_BUTTON_DOWN|RI_MOUSE_RIGHT_BUTTON_DOWN|RI_MOUSE_MIDDLE_BUTTON_DOWN|RI_MOUSE_BUTTON_4_DOWN|RI_MOUSE_BUTTON_5_DOWN);
+            mouseUp=input->data.mouse.usButtonFlags&(RI_MOUSE_LEFT_BUTTON_UP|RI_MOUSE_RIGHT_BUTTON_UP|RI_MOUSE_MIDDLE_BUTTON_UP|RI_MOUSE_BUTTON_4_UP|RI_MOUSE_BUTTON_5_UP);
             source="raw-mouse"; return mouseActivity(input->data.mouse,GetTickCount64());
         }
         if(input->header.dwType==RIM_TYPEKEYBOARD && size>=offsetof(RAWINPUT,data)+sizeof(RAWKEYBOARD)) {
