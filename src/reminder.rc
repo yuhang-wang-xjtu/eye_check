@@ -99,7 +99,7 @@ CAPTION "检查更新"
 FONT UI_BODY_POINTS, UI_FONT_FACE
 BEGIN
     LTEXT "", IDC_UPDATE_STATUS, 12, 12, 286, 43
-    LTEXT "新版按版本号保存，下载后校验 SHA-256；解压后退出旧版再运行新版，设置和记录保留。", -1, 12, 62, 286, 31
+    LTEXT "点击更新后，后台下载并校验，自动替换原程序、重启；设置和记录保留。新版启动失败会恢复旧版。", -1, 12, 62, 286, 31
     DEFPUSHBUTTON "检查更新", IDC_UPDATE_ACTION, 12, 111, 95, 21
     PUSHBUTTON "GitHub 发布页", IDC_UPDATE_PAGE, 112, 111, 95, 21
     PUSHBUTTON "关闭", IDCANCEL, 212, 111, 86, 21

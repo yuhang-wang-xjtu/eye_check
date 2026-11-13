@@ -14,12 +14,13 @@ $releaseRoot=Join-Path $repoRoot "out\releases\v$Version"
 $windowsRoot=Join-Path $releaseRoot 'windows'
 New-Item -ItemType Directory -Force -Path $windowsRoot | Out-Null
 Copy-Item -LiteralPath $exe -Destination (Join-Path $windowsRoot 'EyeBreak.exe')
+Copy-Item -LiteralPath $exe -Destination (Join-Path $releaseRoot "EyeBreak-Windows-x64-v$Version.exe")
 Copy-Item -LiteralPath (Join-Path $repoRoot 'README.md') -Destination (Join-Path $windowsRoot 'README.md')
 Copy-Item -LiteralPath (Join-Path $repoRoot 'third_party\nlohmann\LICENSE.MIT') -Destination (Join-Path $windowsRoot 'nlohmann-json-LICENSE.txt')
 Compress-Archive -LiteralPath (Join-Path $windowsRoot 'EyeBreak.exe'),(Join-Path $windowsRoot 'README.md'),(Join-Path $windowsRoot 'nlohmann-json-LICENSE.txt') -DestinationPath (Join-Path $releaseRoot "EyeBreak-Windows-x64-v$Version.zip") -Force
 Copy-Item -LiteralPath $apk -Destination (Join-Path $releaseRoot "EyeBreak-Android-v$Version.apk")
 Compress-Archive -LiteralPath (Join-Path $repoRoot 'sync\server.py'),(Join-Path $repoRoot 'sync\test_server.py'),(Join-Path $repoRoot 'sync\README.md'),(Join-Path $repoRoot 'sync\deploy') -DestinationPath (Join-Path $releaseRoot "EyeBreak-Sync-Prototype-v$Version.zip") -Force
-$assets=Get-ChildItem -LiteralPath $releaseRoot -File | Where-Object {$_.Extension -in '.apk','.zip'}
+$assets=Get-ChildItem -LiteralPath $releaseRoot -File | Where-Object {$_.Extension -in '.apk','.zip','.exe'}
 $lines=$assets | ForEach-Object {(Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLower()+'  '+$_.Name}
 [IO.File]::WriteAllLines((Join-Path $releaseRoot 'SHA256SUMS.txt'),$lines,[Text.UTF8Encoding]::new($false))
 Write-Output "Release packaged: $releaseRoot"

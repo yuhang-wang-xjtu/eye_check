@@ -16,6 +16,7 @@
 #include "diagnostics.h"
 #include "sync_client.h"
 #include "update_checker.h"
+#include "update_installer.h"
 #include "reminder_keys.h"
 #include "reminder_watch.h"
 
@@ -510,6 +511,7 @@ void beginRest(bool notify) {
     showAutomaticReminder(EyeNotice::Start,0,true);
 }
 #include "sync_runtime.inl"
+#include "update_state.inl"
 #include "update_runtime.inl"
 bool sharedMode() { return syncActive; }
 bool saveReminderSettings(const AppSettings& draft) {
@@ -717,6 +719,14 @@ LRESULT CALLBACK proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
         return 0;
     }
     switch (message) {
+    case UpdateExitMessage:
+        if(pendingInstall) {
+            try {
+                saveUpdateState(pendingInstall->state); pendingInstall->commitInstall();
+                DestroyWindow(hwnd);
+            } catch(...) {pendingInstall->cancelInstall();pendingInstall.reset();updateStatus=L"无法保存更新前状态，已取消安装，原程序继续运行。";updateView();}
+        }
+        return 0;
     case WM_CREATE: {
         window = hwnd;
         SetWindowLongPtrW(hwnd, GWL_STYLE, GetWindowLongPtrW(hwnd, GWL_STYLE) | WS_CLIPCHILDREN);
@@ -800,6 +810,7 @@ LRESULT CALLBACK proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
         if(wparam==ReminderPollTimer) { pollReminderInputs(); return 0; }
         static ULONGLONG previousSecond = 0, lastUsageSave = 0;
         auto now = GetTickCount64(); auto oldState = timer.state;
+        pumpUpdates();
         sessionTiming.advance(now);
         pumpSync(now);
         if(now-lastUsageSave>=30000) { persistUsage(); lastUsageSave=now; }
@@ -924,6 +935,12 @@ LRESULT CALLBACK proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
 }
 }
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
+    try {
+        const auto args=Updates::arguments();
+        if(args.size()>1 && args[1]==L"--apply-update")return args.size()==3?Updates::runInstaller(args[2]):1;
+        if(args.size()==4 && args[1]==L"--updated"){updateStartup.startedEvent=args[2];updateStartup.state=args[3];}
+        if(args.size()==3 && args[1]==L"--update-rollback")updateStartup.state=args[2];
+    } catch(...) {return 1;}
     HANDLE singleton = CreateMutexW(nullptr, FALSE, L"Local\\EyeBreak202020.Singleton");
     if (!singleton) return 1;
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
@@ -946,6 +963,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     if(!settingsDirectory.empty()) Diagnostics::file=settingsDirectory+L"\\diagnostics.log";
     Diagnostics::write("startup-raw-input-v2",timer.state,timer.state);
     initializeUsage();
+    try {restoreUpdateState();} catch(...) {DeleteObject(background);CloseHandle(singleton);return 1;}
     syncConfig=SharedSync::loadConfig(settingsDirectory);
     if(syncConfig.enabled) { enterShared(); syncStatus=L"连接中…"; launchSync(); }
     if(!usageStorageOk) MessageBoxW(nullptr,L"每日使用统计文件读取失败，原文件将保留。",L"使用统计",MB_OK|MB_ICONWARNING);
@@ -961,7 +979,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     const auto initialSize=Dpi::outerSize(window,496,384,mainDpi);
     SetWindowPos(window,nullptr,0,0,initialSize.cx,initialSize.cy,SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
     syncDesktopIcon(); refresh();
+    if(updateStartup.restored){SetWindowPos(window,nullptr,updateStartup.x,updateStartup.y,0,0,SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE);show=updateStartup.visible?SW_SHOWNORMAL:SW_HIDE;}
     ShowWindow(window, show); UpdateWindow(window);
+    if(!updateStartup.startedEvent.empty()) {
+        Updates::WinHandle event(OpenEventW(EVENT_MODIFY_STATE,FALSE,updateStartup.startedEvent.c_str()));
+        if(event.value)SetEvent(event);
+    }
     MSG message{};
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {
         if (reminderMessage(message)) continue;

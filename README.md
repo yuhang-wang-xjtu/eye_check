@@ -1,6 +1,6 @@
 # 20·20·20 Windows 护眼提醒
 
-下载最新版：[GitHub Releases](https://github.com/yuhang-wang-xjtu/eye_check/releases/latest)。Windows 下载 `EyeBreak-Windows-x64-v0.2.1.zip`，退出旧程序后解压运行 `EyeBreak.exe`；设置和记录保留在原 LocalAppData 目录。Android 下载 `EyeBreak-Android-v0.2.4.apk` 覆盖安装，之后可在设置页“检查 GitHub 更新”。Windows 暂不提供应用内更新。
+下载最新版：[GitHub Releases](https://github.com/yuhang-wang-xjtu/eye_check/releases/latest)。Windows 下载版本对应的独立 EXE，退出旧程序后运行，无需解压；从 v0.5.0 开始，可在应用内检查更新并自动安装、重启。设置和记录保留在原 LocalAppData 目录。Android 下载版本对应的 APK 覆盖安装，之后可在设置页“检查 GitHub 更新”。
 
 v0.2.1 为原型发布。Android APK 使用调试签名，覆盖更新必须保持签名一致；签名密钥不得提交仓库。Windows 发布包使用静态 MSVC 运行库构建（CMake 配置加 `-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded`）。发布附件提供 SHA-256 清单。
 
@@ -106,11 +106,13 @@ Windows 自动提醒使用独立弹窗：自动远眺休息开始、休息完成
 
 ## Windows 更新与版本目录
 
-主窗口“更新”或托盘“检查更新…”手动检查本仓库正式 Release。只接受数字版本、对应版本的 Windows x64 ZIP、固定仓库下载地址及 GitHub 提供的 SHA-256 和大小；拒绝草稿、预发布、降级、异常链接及未通过校验的下载。下载与校验在后台进行，不占用计时线程；下载重定向仅允许 GitHub 官方 HTTPS 文件域名，不发送同步令牌。
+主窗口“更新”或托盘“检查更新…”检查本仓库正式 Release，发现新版后点击“立即更新并重启”。应用在后台下载对应版本的 Windows x64 EXE，校验 GitHub 提供的 SHA-256、文件大小及 EXE 内版本号，再退出旧版、替换原路径的程序并自动重启。拒绝草稿、预发布、降级、异常链接及未通过校验的下载；下载重定向仅允许 GitHub 官方 HTTPS 文件域名，不发送同步令牌。
 
-下载包保存到 `%LOCALAPPDATA%\EyeBreak202020\releases\v版本号\`。点击“打开版本文件夹”，解压后退出旧版再运行新版；便携版更新不会自动替换正在运行的 EXE，设置和记录仍保存在原 LocalAppData 目录。网络失败时可从对话框打开 GitHub 发布页手动下载。
+下载文件保存到 `%LOCALAPPDATA%\EyeBreak202020\releases\v版本号\`。更新保留原程序路径、快捷方式、设置和使用记录，并交接计时状态及主窗口显示状态；本地计时在短暂重启期间暂停，联网共享计时仍以服务器为准。新版未能完成启动时恢复旧版并尝试重新运行。网络、校验或目录写入失败时，旧程序继续运行；不自动提权，请把便携版放在当前用户可写的目录。
 
-本机正式发布文件统一使用 `out/releases/v版本号/windows/EyeBreak.exe`；该版本 ZIP、APK、服务端源码包及校验文件位于 `out/releases/v版本号/`。旧版本不被新构建覆盖。构建匹配版本的 Windows 和安卓后执行 `./tools/package_release.ps1` 打包，脚本会核对 EXE 版本资源和 APK 元数据，拒绝混入其他版本。
+v0.5.0 之前的版本没有自动安装功能，首次升级请退出旧版，下载并运行独立 EXE，无需解压。后续升级即可在应用内完成。仅有 ZIP 的旧发布版仍可打开发布页下载。
+
+本机正式发布文件统一使用 `out/releases/v版本号/windows/EyeBreak.exe`；该版本独立 EXE、ZIP、APK、服务端源码包及校验文件位于 `out/releases/v版本号/`。旧版本不被新构建覆盖。构建匹配版本的 Windows 和安卓后执行 `./tools/package_release.ps1` 打包，脚本会核对 EXE 版本资源和 APK 元数据，拒绝混入其他版本。
 
 ## 输入过滤与诊断日志
 

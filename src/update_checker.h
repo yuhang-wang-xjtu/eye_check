@@ -18,18 +18,19 @@ inline std::array<unsigned,3> version(std::string text) {
     for(int i=0;i<3;++i) { auto stop=text.find('.'); result[i]=static_cast<unsigned>(std::stoul(text.substr(0,stop))); if(stop!=std::string::npos) text.erase(0,stop+1); }
     return result;
 }
-struct Release { std::string tag,url,digest; std::uint64_t bytes=0; bool newer=false; std::wstring path; };
-inline std::string assetName(const std::string& tag) { return "EyeBreak-Windows-x64-"+tag+".zip"; }
+struct Release { std::string tag,url,digest; std::uint64_t bytes=0; bool newer=false,executable=false; std::wstring path; };
+inline std::string assetName(const std::string& tag,bool executable=false) { return "EyeBreak-Windows-x64-"+tag+(executable?".exe":".zip"); }
 inline Release parse(const std::string& body,const std::string& current=Version) {
     auto j=Json::parse(body); Release r;
     if(!j.at("draft").is_boolean() || !j.at("prerelease").is_boolean() || j.at("draft").get<bool>() || j.at("prerelease").get<bool>()) throw std::runtime_error("unstable release");
     r.tag=j.at("tag_name").get<std::string>(); if(r.tag.empty() || r.tag.front()!='v') throw std::runtime_error("tag");
     r.newer=version(r.tag)>version(current);
     const auto& assets=j.at("assets"); if(!assets.is_array()) throw std::runtime_error("assets");
-    for(const auto& a:assets) if(a.at("name").get<std::string>()==assetName(r.tag)) {
+    for(const auto& a:assets) if(a.at("name").get<std::string>()==assetName(r.tag,true)) r.executable=true;
+    for(const auto& a:assets) if(a.at("name").get<std::string>()==assetName(r.tag,r.executable)) {
         if(!r.url.empty()) throw std::runtime_error("duplicate asset");
         r.url=a.at("browser_download_url").get<std::string>();
-        if(r.url!="https://github.com/yuhang-wang-xjtu/eye_check/releases/download/"+r.tag+"/"+assetName(r.tag)) throw std::runtime_error("asset url");
+        if(r.url!="https://github.com/yuhang-wang-xjtu/eye_check/releases/download/"+r.tag+"/"+assetName(r.tag,r.executable)) throw std::runtime_error("asset url");
         r.digest=a.at("digest").get<std::string>();
         if(!std::regex_match(r.digest,std::regex("sha256:[0-9a-fA-F]{64}"))) throw std::runtime_error("digest");
         r.digest.erase(0,7); std::transform(r.digest.begin(),r.digest.end(),r.digest.begin(),[](unsigned char c){return static_cast<char>(std::tolower(c));});
@@ -93,11 +94,11 @@ inline Release check() {
 }
 inline Release download(Release r,const std::wstring& base) {
     // Revalidate all externally supplied metadata before deriving any file path.
-    version(r.tag); if(r.tag.empty() || r.tag.front()!='v' || r.url!="https://github.com/yuhang-wang-xjtu/eye_check/releases/download/"+r.tag+"/"+assetName(r.tag) ||
+    version(r.tag); if(r.tag.empty() || r.tag.front()!='v' || r.url!="https://github.com/yuhang-wang-xjtu/eye_check/releases/download/"+r.tag+"/"+assetName(r.tag,r.executable) ||
         !r.bytes || r.bytes>100ULL*1024*1024 || !std::regex_match(r.digest,std::regex("[0-9a-f]{64}"))) throw std::runtime_error("metadata");
     const auto directory=std::filesystem::path(base)/L"releases"/SharedSync::wide(r.tag);
     std::filesystem::create_directories(directory);
-    const auto file=directory/SharedSync::wide(assetName(r.tag)),temporary=std::filesystem::path(file.wstring()+L".part-"+SharedSync::newDeviceId());
+    const auto file=directory/SharedSync::wide(assetName(r.tag,r.executable)),temporary=std::filesystem::path(file.wstring()+L".part-"+SharedSync::newDeviceId());
     try {
         Sha256 hash; std::uint64_t total=0;
         std::ofstream stream(temporary,std::ios::binary|std::ios::trunc); if(!stream) throw std::runtime_error("write");

@@ -18,6 +18,8 @@ int main(int argc,char** argv) {
     check(!Updates::parse(j.dump(),"0.4.0").newer,"same version ignored");
     check(!Updates::parse(j.dump(),"0.5.0").newer,"downgrade ignored");
     check(Updates::version("v0.10.0")>Updates::version("v0.9.9"),"numeric comparison");
+    auto direct=j;auto exe=j["assets"][0];exe["name"]="EyeBreak-Windows-x64-v0.4.0.exe";exe["browser_download_url"]="https://github.com/yuhang-wang-xjtu/eye_check/releases/download/v0.4.0/EyeBreak-Windows-x64-v0.4.0.exe";direct["assets"].push_back(exe);
+    check(Updates::parse(direct.dump(),"0.3.0").executable,"automatic updater prefers verified standalone executable over ZIP");
     auto bad=j; bad["tag_name"]="v../../bad"; check(rejects(bad),"path traversal tag");
     bad=j; bad["draft"]=true; check(rejects(bad),"draft ignored");
     bad=j; bad["prerelease"]=true; check(rejects(bad),"prerelease ignored");
